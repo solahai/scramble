@@ -1,81 +1,231 @@
 <!DOCTYPE html>
-<html lang="en" class="bg-gray-100">
+<html lang="en" class="bg-gray-50">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Scramble Options</title>
+    <title>Scramble Settings</title>
     <link href="./libs/tw-output.css" rel="stylesheet">
+    <style>
+        .gradient-header { background: linear-gradient(135deg, #6366f1, #8b5cf6); }
+        .fade-in { animation: fadeIn 0.3s ease; }
+        @keyframes fadeIn { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+        .toggle-section { overflow: hidden; transition: max-height 0.3s ease; }
+        .toggle-section.collapsed { max-height: 0 !important; }
+        .api-key-field { -webkit-text-security: disc; }
+        .api-key-field.revealed { -webkit-text-security: none; }
+    </style>
 </head>
-<body class="font-sans text-gray-900 antialiased">
-    <div class="max-w-3xl mx-auto p-6 bg-white shadow-lg rounded-lg mt-10">
-        <h1 class="text-3xl font-bold text-gray-900 mb-4">Scramble settings</h1>
-        <p class="text-gray-700 mb-8">
-            Scramble is an open-source Chrome extension that leverages AI to enhance your writing directly in your browser. It's designed to be a more customizable and privacy-respecting alternative to Grammarly.
-        </p>
-
-        <h2 class="text-2xl font-semibold text-gray-800 mt-8 mb-4">LLM configuration</h2>
-        <div class="space-y-4">
-            <label class="block">
-                <span class="text-gray-700">LLM Provider:</span>
-                <select id="llmProvider" class="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                    <option value="openai">OpenAI</option>
-                    <option value="anthropic">Anthropic</option>
-                    <option value="ollama">Ollama (Local)</option>
-                    <option value="lmstudio">LM Studio (Local)</option>
-                    <option value="groq">Groq</option>
-                    <option value="openrouter">OpenRouter</option>
-                </select>
-            </label>
-            <label class="block">
-                <span class="text-gray-700">API Key:</span>
-                <input type="text" id="apiKey" placeholder="Enter your API key" class="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                <small id="apiKeyHelp" class="text-gray-500 text-sm mt-1 block"></small>
-            </label>
-            <label class="block">
-                <span class="text-gray-700">LLM Model:</span>
-                <div class="flex gap-2">
-                    <input type="text" id="llmModel" placeholder="Enter the LLM model (e.g., gpt-3.5-turbo)" class="mt-1 flex-1 rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                    <button id="fetchModels" type="button" class="mt-1 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:bg-gray-400 disabled:cursor-not-allowed">
-                        <span id="fetchModelsText">Fetch Models</span>
-                        <span id="fetchModelsSpinner" class="hidden">⟳</span>
-                    </button>
+<body class="font-sans text-gray-900 antialiased min-h-screen">
+    <!-- Header -->
+    <div class="gradient-header text-white">
+        <div class="max-w-3xl mx-auto px-6 py-8">
+            <div class="flex items-center gap-3 mb-2">
+                <div class="w-10 h-10 bg-white/20 rounded-xl flex items-center justify-center">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>
+                    </svg>
                 </div>
-                <small id="modelHelp" class="text-gray-500 text-sm mt-1 block"></small>
-                <select id="availableModels" class="mt-2 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50 hidden">
-                    <option value="">Select a model...</option>
-                </select>
-            </label>
-            <label class="block">
-                <span class="text-gray-700">Custom Endpoint (optional):</span>
-                <input type="text" id="customEndpoint" placeholder="Enter custom API endpoint URL" class="mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
-                <small id="endpointHelp" class="text-gray-500 text-sm mt-1 block"></small>
-            </label>
-        </div>
-        
-        <h2 class="text-2xl font-semibold text-gray-800 mt-8 mb-4">Custom prompts</h2>
-        <div id="prompts-container" class="space-y-4"></div>
-        <button id="add-prompt" class="mt-4 px-4 py-2 bg-indigo-600 text-white rounded-md hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 font-bold">Add prompt</button>
-
-        <div id="status" class="mt-6 text-sm text-gray-700"></div>
-        <div class="flex justify-center">
-            <button id="save" class="mx-auto mt-6 px-4 py-2 bg-indigo-600 text-white font-bold rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">Save changes</button>
+                <div>
+                    <h1 class="text-2xl font-bold tracking-tight">Scramble Settings</h1>
+                    <p class="text-sm text-indigo-100 mt-0.5">Configure your AI writing assistant</p>
+                </div>
+            </div>
         </div>
     </div>
-    
+
+    <div class="max-w-3xl mx-auto px-6 -mt-4">
+        <!-- System Instructions Card -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-6 fade-in">
+            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between cursor-pointer" onclick="toggleSection('system-section')">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-purple-100 rounded-lg flex items-center justify-center">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-900">System Instructions</h2>
+                        <p class="text-sm text-gray-500">Customize how the AI processes your text</p>
+                    </div>
+                </div>
+                <svg id="system-section-chevron" class="w-5 h-5 text-gray-400 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+            </div>
+            <div id="system-section" class="toggle-section px-6 py-5">
+                <div class="space-y-3">
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">Main System Instruction</span>
+                        <p class="text-xs text-gray-500 mt-1 mb-2">This instruction is sent with every request to guide the AI's behavior. Customize it to fit your writing style and needs.</p>
+                        <textarea id="systemInstruction" rows="4" class="mt-1 block w-full rounded-lg border border-gray-300 bg-white px-4 py-3 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50 resize-y" placeholder="You are a helpful writing assistant..."></textarea>
+                    </label>
+                    <div class="flex items-center gap-2">
+                        <button id="resetSystemInstruction" type="button" class="text-xs text-indigo-600 hover:text-indigo-800 font-medium transition-colors">
+                            ↻ Reset to default
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- LLM Configuration Card -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-6 fade-in">
+            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between cursor-pointer" onclick="toggleSection('llm-section')">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-blue-100 rounded-lg flex items-center justify-center">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-900">LLM Configuration</h2>
+                        <p class="text-sm text-gray-500">Set up your AI provider and model</p>
+                    </div>
+                </div>
+                <svg id="llm-section-chevron" class="w-5 h-5 text-gray-400 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+            </div>
+            <div id="llm-section" class="toggle-section px-6 py-5">
+                <div class="space-y-5">
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">LLM Provider</span>
+                        <select id="llmProvider" class="mt-1.5 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50">
+                            <option value="openai">OpenAI</option>
+                            <option value="anthropic">Anthropic</option>
+                            <option value="groq">Groq</option>
+                            <option value="openrouter">OpenRouter</option>
+                            <option value="ollama">Ollama (Local)</option>
+                            <option value="lmstudio">LM Studio (Local)</option>
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700" id="apiKeyLabel">API Key</span>
+                        <div class="mt-1.5 relative">
+                            <input type="text" id="apiKey" placeholder="Enter your API key" class="api-key-field block w-full rounded-lg border border-gray-300 bg-white pl-3 pr-10 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50">
+                            <button type="button" id="toggleApiKey" class="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 p-1" title="Show/hide API key">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+                                </svg>
+                            </button>
+                        </div>
+                        <small id="apiKeyHelp" class="text-gray-500 text-xs mt-1.5 block"></small>
+                    </label>
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">Model</span>
+                        <div class="flex gap-2 mt-1.5">
+                            <input type="text" id="llmModel" placeholder="e.g., gpt-4o-mini" class="flex-1 rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50">
+                            <button id="fetchModels" type="button" class="px-4 py-2.5 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:bg-gray-400 disabled:cursor-not-allowed transition-colors whitespace-nowrap font-medium">
+                                <span id="fetchModelsText">Fetch Models</span>
+                                <span id="fetchModelsSpinner" class="hidden">
+                                    <svg class="animate-spin h-4 w-4 inline" viewBox="0 0 24 24">
+                                        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4" fill="none"/>
+                                        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/>
+                                    </svg>
+                                </span>
+                            </button>
+                        </div>
+                        <small id="modelHelp" class="text-gray-500 text-xs mt-1.5 block"></small>
+                        <select id="availableModels" class="mt-2 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50 hidden">
+                            <option value="">Select a model...</option>
+                        </select>
+                    </label>
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">Custom Endpoint <span class="text-gray-400 font-normal">(optional)</span></span>
+                        <input type="text" id="customEndpoint" placeholder="Enter custom API endpoint URL" class="mt-1.5 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50">
+                        <small id="endpointHelp" class="text-gray-500 text-xs mt-1.5 block"></small>
+                    </label>
+
+                    <!-- Advanced Settings -->
+                    <details class="group">
+                        <summary class="text-sm font-medium text-indigo-600 cursor-pointer hover:text-indigo-800 transition-colors list-none flex items-center gap-1">
+                            <svg class="w-4 h-4 transition-transform group-open:rotate-90" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="9 18 15 12 9 6"/>
+                            </svg>
+                            Advanced Settings
+                        </summary>
+                        <div class="mt-4 space-y-4 pl-5 border-l-2 border-indigo-100">
+                            <label class="block">
+                                <span class="text-sm font-medium text-gray-700">Temperature</span>
+                                <div class="flex items-center gap-3 mt-1.5">
+                                    <input type="range" id="temperature" min="0" max="2" step="0.1" value="0.7" class="flex-1 accent-indigo-600">
+                                    <span id="temperatureValue" class="text-sm text-gray-600 w-8 text-center font-mono">0.7</span>
+                                </div>
+                                <small class="text-gray-500 text-xs mt-1 block">Lower = more precise, Higher = more creative</small>
+                            </label>
+                            <label class="block">
+                                <span class="text-sm font-medium text-gray-700">Max Tokens</span>
+                                <input type="number" id="maxTokens" value="2048" min="100" max="16000" step="100" class="mt-1.5 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50">
+                                <small class="text-gray-500 text-xs mt-1 block">Maximum length of the AI response</small>
+                            </label>
+                        </div>
+                    </details>
+                </div>
+            </div>
+        </div>
+
+        <!-- Custom Prompts Card -->
+        <div class="bg-white rounded-xl shadow-sm border border-gray-200 mb-6 fade-in">
+            <div class="px-6 py-4 border-b border-gray-100 flex items-center justify-between cursor-pointer" onclick="toggleSection('prompts-section')">
+                <div class="flex items-center gap-3">
+                    <div class="w-8 h-8 bg-emerald-100 rounded-lg flex items-center justify-center">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-900">Custom Prompts</h2>
+                        <p class="text-sm text-gray-500">Create your own text enhancement actions</p>
+                    </div>
+                </div>
+                <svg id="prompts-section-chevron" class="w-5 h-5 text-gray-400 transition-transform" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="6 9 12 15 18 9"/>
+                </svg>
+            </div>
+            <div id="prompts-section" class="toggle-section px-6 py-5">
+                <div id="prompts-container" class="space-y-3"></div>
+                <button id="add-prompt" class="mt-4 flex items-center gap-2 px-4 py-2.5 bg-emerald-600 text-white text-sm rounded-lg hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2 font-semibold transition-colors">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
+                    </svg>
+                    Add Custom Prompt
+                </button>
+            </div>
+        </div>
+
+        <!-- Save Button & Status -->
+        <div class="sticky bottom-0 bg-gray-50/80 backdrop-blur-sm py-4 border-t border-gray-200 -mx-6 px-6">
+            <div class="flex items-center justify-between max-w-3xl mx-auto">
+                <div id="status" class="text-sm text-gray-600 flex items-center gap-2"></div>
+                <button id="save" class="px-8 py-2.5 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 transition-all shadow-sm hover:shadow-md text-sm">
+                    Save Changes
+                </button>
+            </div>
+        </div>
+
+        <div class="h-6"></div>
+    </div>
+
     <script src="options.js"></script>
 
     <template id="prompt-template">
-        <div class="prompt-container bg-gray-100 p-4 rounded-lg border border-gray-300">
-            <label class="block mb-2">
-                <span class="text-gray-700">Prompt Title:</span>
-                <input type="text" class="prompt-title mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50" placeholder="Enter prompt title">
-            </label>
-            <label class="block mb-2">
-                <span class="text-gray-700">Prompt:</span>
-                <textarea class="prompt-text mt-1 block w-full rounded-md border border-gray-300 bg-white px-3 py-2 shadow-sm focus:border-indigo-500 focus:ring focus:ring-indigo-200 focus:ring-opacity-50" placeholder="Enter your prompt here" rows="3"></textarea>
-            </label>
-            <div class="prompt-actions mt-2">
-                <button class="delete-prompt px-4 py-2 bg-red-600 text-white font-bold rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2">Delete</button>
+        <div class="prompt-container bg-gray-50 p-4 rounded-lg border border-gray-200 fade-in">
+            <div class="flex gap-3">
+                <div class="flex-1 space-y-3">
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">Title</span>
+                        <input type="text" class="prompt-title mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50" placeholder="e.g., Make it shorter">
+                    </label>
+                    <label class="block">
+                        <span class="text-sm font-medium text-gray-700">Prompt</span>
+                        <textarea class="prompt-text mt-1 block w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:ring-2 focus:ring-indigo-200 focus:ring-opacity-50 resize-y" placeholder="Write the instruction for the AI..." rows="2"></textarea>
+                    </label>
+                </div>
+                <button class="delete-prompt self-start mt-6 p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors" title="Delete prompt">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                    </svg>
+                </button>
             </div>
         </div>
     </template>
