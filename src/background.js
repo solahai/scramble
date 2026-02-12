@@ -13,12 +13,12 @@ const DEFAULT_PROMPTS = [
   { id: 'translate_english', title: 'Translate to English', prompt: 'Translate the following text to English. Return only the translated text without quotes, explanations, or additional text:' },
 ];
 
-const DEFAULT_SYSTEM_INSTRUCTION = 'You are a helpful writing assistant. You enhance, correct, and improve text while preserving the author\'s voice and intent. Always return only the processed text without any additional commentary, quotes, or explanation.';
+const DEFAULT_SYSTEM_INSTRUCTION = 'You are a helpful writing assistant. You enhance, correct, and improve text while preserving the author\'s voice and intent. IMPORTANT: Preserve the original paragraph structure and line breaks exactly as they appear. Do not merge paragraphs or remove line breaks. Always return only the processed text without any additional commentary, quotes, or explanation.';
 
 const CONFIG_DEFAULTS = {
   apiKey: '',
   llmProvider: 'openai',
-  llmModel: 'gpt-4o-mini',
+  llmModel: 'gpt-5.2',
   customEndpoint: '',
   customPrompts: [],
   systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
@@ -262,7 +262,36 @@ async function enhanceWithOpenAI(prompt, systemInstruction, config) {
     throw new Error('OpenAI API key not set. Please configure it in Scramble settings.');
   }
 
-  const endpoint = config.customEndpoint || 'https://api.openai.com/v1/chat/completions';
+  const model = config.llmModel || 'gpt-5.2';
+  const customEndpoint = config.customEndpoint || '';
+
+  // If user set a custom endpoint, use Chat Completions format against that endpoint
+  if (customEndpoint) {
+    return await openaiChatCompletions(prompt, systemInstruction, config, model, customEndpoint);
+  }
+
+  // For all official OpenAI models, use the Responses API (works with gpt-5.2, gpt-5, gpt-4.1, gpt-4o-mini, etc.)
+  return await openaiResponsesAPI(prompt, systemInstruction, config, model);
+}
+
+async function openaiResponsesAPI(prompt, systemInstruction, config, model) {
+  const endpoint = 'https://api.openai.com/v1/responses';
+
+  const body = {
+    model: model,
+    instructions: systemInstruction,
+    input: prompt,
+    max_output_tokens: config.maxTokens || 2048,
+  };
+
+  // gpt-5 (base, not 5.2+) does not support temperature — all others do
+  const isGPT5Base = /^gpt-5$/i.test(model) || /^gpt-5-\d/i.test(model);
+  if (!isGPT5Base) {
+    const temp = config.temperature ?? 0.7;
+    if (temp !== 1) {
+      body.temperature = temp;
+    }
+  }
 
   const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
@@ -270,8 +299,41 @@ async function enhanceWithOpenAI(prompt, systemInstruction, config) {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
     },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    throw new Error(`OpenAI API error (${response.status}): ${errorData?.error?.message || response.statusText}`);
+  }
+
+  const data = await response.json();
+
+  // Responses API: output[] → message → content[] → output_text
+  if (data.output && Array.isArray(data.output)) {
+    for (const item of data.output) {
+      if (item.type === 'message' && item.content) {
+        for (const content of item.content) {
+          if (content.type === 'output_text' || content.type === 'text') {
+            return content.text.trim();
+          }
+        }
+      }
+    }
+  }
+
+  throw new Error('Unexpected response format from OpenAI API.');
+}
+
+async function openaiChatCompletions(prompt, systemInstruction, config, model, endpoint) {
+  const response = await fetchWithTimeout(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${config.apiKey}`,
+    },
     body: JSON.stringify({
-      model: config.llmModel || 'gpt-4o-mini',
+      model: model,
       messages: [
         { role: 'system', content: systemInstruction },
         { role: 'user', content: prompt }

@@ -1,6 +1,6 @@
 const browserAPI = (typeof browser !== 'undefined' ? browser : chrome);
 
-const DEFAULT_SYSTEM_INSTRUCTION = 'You are a helpful writing assistant. You enhance, correct, and improve text while preserving the author\'s voice and intent. Always return only the processed text without any additional commentary, quotes, or explanation.';
+const DEFAULT_SYSTEM_INSTRUCTION = 'You are a helpful writing assistant. You enhance, correct, and improve text while preserving the author\'s voice and intent. IMPORTANT: Preserve the original paragraph structure and line breaks exactly as they appear. Do not merge paragraphs or remove line breaks. Always return only the processed text without any additional commentary, quotes, or explanation.';
 
 // ========== Toggle Sections ==========
 
@@ -129,7 +129,7 @@ async function restoreOptions() {
     const defaults = {
       llmProvider: 'openai',
       apiKey: '',
-      llmModel: 'gpt-4o-mini',
+      llmModel: 'gpt-5.2',
       customEndpoint: '',
       customPrompts: [],
       systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
@@ -211,10 +211,10 @@ function updateUIForProvider(provider) {
         label: 'OpenAI API Key',
         placeholder: 'sk-...',
         help: 'Get your API key from platform.openai.com/api-keys',
-        model: 'gpt-4o-mini, gpt-4o, gpt-4-turbo, o1-mini',
-        modelHelp: 'Recommended: gpt-4o-mini (fast & affordable) or gpt-4o (best quality)',
-        endpoint: 'https://api.openai.com/v1/chat/completions (default)',
-        endpointHelp: 'Leave empty to use default OpenAI endpoint',
+        model: 'gpt-5.2, gpt-5, gpt-4.1, gpt-4o-mini',
+        modelHelp: 'Recommended: gpt-5.2 (newest) or gpt-4.1 (fast & capable)',
+        endpoint: 'Uses Responses API by default',
+        endpointHelp: 'Leave empty to use the OpenAI Responses API. Only set a custom endpoint for proxies or compatible services.',
         showApiKey: true,
       },
       anthropic: {
