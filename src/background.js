@@ -24,7 +24,10 @@ const CONFIG_DEFAULTS = {
   systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
   temperature: 0.7,
   maxTokens: 2048,
+  showPreview: true,
 };
+
+const activeRequests = new Map();
 
 // --- Installation & Setup ---
 
@@ -37,10 +40,12 @@ if (typeof importScripts === 'function') {
 async function handleInstall(details) {
   if (details.reason === 'install') {
     log('Scramble installed. Welcome!');
-    // Set defaults on first install
     const existing = await getConfig();
     if (!existing.apiKey) {
-      await browserAPI.storage.sync.set(CONFIG_DEFAULTS);
+      await browserAPI.storage.sync.set({ ...CONFIG_DEFAULTS, onboardingComplete: false });
+    }
+    if (browserAPI.runtime.openOptionsPage) {
+      browserAPI.runtime.openOptionsPage();
     }
   } else if (details.reason === 'update') {
     log(`Extension updated to v${browserAPI.runtime.getManifest().version}`);
@@ -118,37 +123,83 @@ browserAPI.contextMenus.onClicked.addListener((info, tab) => {
         }
       } catch (error) {
         console.error('Error handling context menu click:', error);
+        notifyTab(tab.id, friendlyError(error.message), 'error');
       }
     }
   });
 });
 
-async function sendEnhanceTextMessage(tabId, promptId, selectedText) {
-  try {
-    await browserAPI.tabs.sendMessage(tabId, {
-      action: 'enhanceText',
-      promptId: promptId,
-      selectedText: selectedText,
-    });
-  } catch (error) {
-    console.error('Error sending enhance message:', error);
-    throw error;
+function notifyTab(tabId, message, type = 'info') {
+  if (!tabId) return;
+  browserAPI.tabs.sendMessage(tabId, { action: 'showToast', message, type }).catch(() => {});
+}
+
+function friendlyError(msg) {
+  if (!msg) return 'Something went wrong. Open Scramble Settings to check your configuration.';
+  if (/401|403|Incorrect API key|invalid.*key|authentication/i.test(msg)) {
+    return 'Invalid API key. Open Scramble Settings to update your key.';
   }
+  if (/timed out|timeout/i.test(msg)) return 'Request timed out. Try again or check your connection.';
+  if (/429|rate limit/i.test(msg)) return 'Rate limit reached. Please wait a moment and try again.';
+  return msg;
+}
+
+async function sendEnhanceTextMessage(tabId, promptId, selectedText) {
+  const response = await browserAPI.tabs.sendMessage(tabId, {
+    action: 'enhanceText',
+    promptId,
+    selectedText,
+  });
+  if (response && !response.success) {
+    notifyTab(tabId, friendlyError(response.error), 'error');
+  }
+  return response;
 }
 
 // --- Message Handler ---
 
 browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === 'enhanceText') {
-    enhanceTextWithRateLimit(request.promptId, request.selectedText)
+    const requestId = request.requestId || `req_${Date.now()}`;
+    const controller = new AbortController();
+    activeRequests.set(requestId, controller);
+
+    const tabId = sender.tab?.id;
+    const onQueued = (position) => {
+      if (tabId && position > 1) {
+        browserAPI.tabs.sendMessage(tabId, { action: 'queueStatus', position }).catch(() => {});
+      }
+    };
+
+    enhanceTextWithRateLimit(request.promptId, request.selectedText, controller.signal, onQueued)
       .then(enhancedText => {
+        activeRequests.delete(requestId);
         sendResponse({ success: true, enhancedText });
       })
       .catch(error => {
-        log(`Error enhancing text: ${error.message}`, 'error');
-        sendResponse({ success: false, error: error.message });
+        activeRequests.delete(requestId);
+        const message = controller.signal.aborted ? 'Cancelled' : error.message;
+        log(`Error enhancing text: ${message}`, 'error');
+        sendResponse({ success: false, error: message });
       });
-    return true; // Keep message channel open for async response
+    return true;
+  }
+
+  if (request.action === 'cancelEnhancement') {
+    const controller = activeRequests.get(request.requestId);
+    if (controller) {
+      controller.abort();
+      activeRequests.delete(request.requestId);
+    }
+    sendResponse({ success: true });
+    return;
+  }
+
+  if (request.action === 'testConnection') {
+    testConnection(request.config)
+      .then(result => sendResponse({ success: true, ...result }))
+      .catch(error => sendResponse({ success: false, error: error.message }));
+    return true;
   }
 
   if (request.action === 'getConfig') {
@@ -222,8 +273,9 @@ if (browserAPI.commands) {
 
 // --- LLM Enhancement ---
 
-async function enhanceTextWithLLM(promptId, text) {
-  const config = await getConfig();
+async function enhanceTextWithLLM(promptId, text, signal = null, overrideConfig = null) {
+  const config = overrideConfig || await getConfig();
+  if (signal?.aborted) throw new Error('Cancelled');
 
   if (!config.llmProvider) {
     throw new Error('LLM provider not configured. Please open Scramble settings.');
@@ -252,12 +304,12 @@ async function enhanceTextWithLLM(promptId, text) {
     throw new Error(`Unsupported provider: ${config.llmProvider}`);
   }
 
-  return await enhanceFunction(fullPrompt, systemInstruction, config);
+  return await enhanceFunction(fullPrompt, systemInstruction, config, signal);
 }
 
 // --- Provider Implementations ---
 
-async function enhanceWithOpenAI(prompt, systemInstruction, config) {
+async function enhanceWithOpenAI(prompt, systemInstruction, config, signal = null) {
   if (!config.apiKey) {
     throw new Error('OpenAI API key not set. Please configure it in Scramble settings.');
   }
@@ -267,14 +319,13 @@ async function enhanceWithOpenAI(prompt, systemInstruction, config) {
 
   // If user set a custom endpoint, use Chat Completions format against that endpoint
   if (customEndpoint) {
-    return await openaiChatCompletions(prompt, systemInstruction, config, model, customEndpoint);
+    return await openaiChatCompletions(prompt, systemInstruction, config, model, customEndpoint, signal);
   }
 
-  // For all official OpenAI models, use the Responses API (works with gpt-5.2, gpt-5, gpt-4.1, gpt-4o-mini, etc.)
-  return await openaiResponsesAPI(prompt, systemInstruction, config, model);
+  return await openaiResponsesAPI(prompt, systemInstruction, config, model, signal);
 }
 
-async function openaiResponsesAPI(prompt, systemInstruction, config, model) {
+async function openaiResponsesAPI(prompt, systemInstruction, config, model, signal = null) {
   const endpoint = 'https://api.openai.com/v1/responses';
 
   const body = {
@@ -300,7 +351,7 @@ async function openaiResponsesAPI(prompt, systemInstruction, config, model) {
       'Authorization': `Bearer ${config.apiKey}`,
     },
     body: JSON.stringify(body),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -325,7 +376,7 @@ async function openaiResponsesAPI(prompt, systemInstruction, config, model) {
   throw new Error('Unexpected response format from OpenAI API.');
 }
 
-async function openaiChatCompletions(prompt, systemInstruction, config, model, endpoint) {
+async function openaiChatCompletions(prompt, systemInstruction, config, model, endpoint, signal = null) {
   const response = await fetchWithTimeout(endpoint, {
     method: 'POST',
     headers: {
@@ -341,7 +392,7 @@ async function openaiChatCompletions(prompt, systemInstruction, config, model, e
       max_tokens: config.maxTokens || 2048,
       temperature: config.temperature ?? 0.7,
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -352,7 +403,7 @@ async function openaiChatCompletions(prompt, systemInstruction, config, model, e
   return data.choices[0].message.content.trim();
 }
 
-async function enhanceWithAnthropic(prompt, systemInstruction, config) {
+async function enhanceWithAnthropic(prompt, systemInstruction, config, signal = null) {
   if (!config.apiKey) {
     throw new Error('Anthropic API key not set. Please configure it in Scramble settings.');
   }
@@ -376,7 +427,7 @@ async function enhanceWithAnthropic(prompt, systemInstruction, config) {
       max_tokens: config.maxTokens || 2048,
       temperature: config.temperature ?? 0.7,
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -387,7 +438,7 @@ async function enhanceWithAnthropic(prompt, systemInstruction, config) {
   return data.content[0].text.trim();
 }
 
-async function enhanceWithOllama(prompt, systemInstruction, config) {
+async function enhanceWithOllama(prompt, systemInstruction, config, signal = null) {
   if (!config.llmModel) {
     throw new Error('Model not set for Ollama. Please configure it in Scramble settings.');
   }
@@ -411,7 +462,7 @@ async function enhanceWithOllama(prompt, systemInstruction, config) {
         top_k: 40,
       }
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
@@ -425,7 +476,7 @@ async function enhanceWithOllama(prompt, systemInstruction, config) {
   return data.response.trim();
 }
 
-async function enhanceWithLMStudio(prompt, systemInstruction, config) {
+async function enhanceWithLMStudio(prompt, systemInstruction, config, signal = null) {
   if (!config.llmModel) {
     throw new Error('Model not set for LM Studio. Please configure it in Scramble settings.');
   }
@@ -448,7 +499,7 @@ async function enhanceWithLMStudio(prompt, systemInstruction, config) {
       temperature: config.temperature ?? 0.7,
       stream: false
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorText = await response.text().catch(() => '');
@@ -462,7 +513,7 @@ async function enhanceWithLMStudio(prompt, systemInstruction, config) {
   return data.choices[0].message.content.trim();
 }
 
-async function enhanceWithGroq(prompt, systemInstruction, config) {
+async function enhanceWithGroq(prompt, systemInstruction, config, signal = null) {
   if (!config.apiKey) {
     throw new Error('Groq API key not set. Please configure it in Scramble settings.');
   }
@@ -484,7 +535,7 @@ async function enhanceWithGroq(prompt, systemInstruction, config) {
       max_tokens: config.maxTokens || 2048,
       temperature: config.temperature ?? 0.7,
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -495,7 +546,7 @@ async function enhanceWithGroq(prompt, systemInstruction, config) {
   return data.choices[0].message.content.trim();
 }
 
-async function enhanceWithOpenRouter(prompt, systemInstruction, config) {
+async function enhanceWithOpenRouter(prompt, systemInstruction, config, signal = null) {
   if (!config.apiKey) {
     throw new Error('OpenRouter API key not set. Please configure it in Scramble settings.');
   }
@@ -519,7 +570,7 @@ async function enhanceWithOpenRouter(prompt, systemInstruction, config) {
       max_tokens: config.maxTokens || 2048,
       temperature: config.temperature ?? 0.7,
     }),
-  });
+  }, 30000, signal);
 
   if (!response.ok) {
     const errorData = await response.json().catch(() => ({}));
@@ -564,9 +615,12 @@ const rateLimiter = (() => {
     }
   };
 
-  return (fn) => {
+  return (fn, onQueued) => {
     return new Promise((resolve, reject) => {
       queue.push({ fn, resolve, reject });
+      if (onQueued && queue.length > 1) {
+        onQueued(queue.length);
+      }
       if (queue.length === 1) {
         executeNext();
       }
@@ -574,9 +628,23 @@ const rateLimiter = (() => {
   };
 })();
 
-const enhanceTextWithRateLimit = (promptId, text) => {
-  return rateLimiter(() => enhanceTextWithLLM(promptId, text));
+const enhanceTextWithRateLimit = (promptId, text, signal, onQueued) => {
+  return rateLimiter(() => {
+    if (signal?.aborted) {
+      return Promise.reject(new Error('Cancelled'));
+    }
+    return enhanceTextWithLLM(promptId, text, signal);
+  }, onQueued);
 };
+
+async function testConnection(config) {
+  const testConfig = { ...(await getConfig()), ...config };
+  const result = await enhanceTextWithLLM('fix_grammar', 'Hello world', null, testConfig);
+  if (!result || !result.trim()) {
+    throw new Error('Connection test returned an empty response.');
+  }
+  return { message: 'Connection successful!', sample: result.trim().slice(0, 80) };
+}
 
 // --- Utilities ---
 
@@ -592,6 +660,7 @@ async function getConfig() {
       systemInstruction: config.systemInstruction || DEFAULT_SYSTEM_INSTRUCTION,
       temperature: config.temperature ?? CONFIG_DEFAULTS.temperature,
       maxTokens: config.maxTokens ?? CONFIG_DEFAULTS.maxTokens,
+      showPreview: config.showPreview !== false,
     };
   } catch (error) {
     console.error('Error getting config:', error);
@@ -599,9 +668,17 @@ async function getConfig() {
   }
 }
 
-async function fetchWithTimeout(url, options, timeout = 30000) {
+async function fetchWithTimeout(url, options, timeout = 30000, externalSignal = null) {
   const controller = new AbortController();
   const id = setTimeout(() => controller.abort(), timeout);
+
+  if (externalSignal) {
+    if (externalSignal.aborted) {
+      clearTimeout(id);
+      throw new Error('Cancelled');
+    }
+    externalSignal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
 
   try {
     const response = await fetch(url, {
@@ -611,7 +688,7 @@ async function fetchWithTimeout(url, options, timeout = 30000) {
     return response;
   } catch (error) {
     if (error.name === 'AbortError') {
-      throw new Error('Request timed out. The AI service took too long to respond.');
+      throw new Error(externalSignal?.aborted ? 'Cancelled' : 'Request timed out. The AI service took too long to respond.');
     }
     throw error;
   } finally {
