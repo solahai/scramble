@@ -28,11 +28,15 @@ const CONFIG_DEFAULTS = {
 };
 
 const activeRequests = new Map();
+let contextMenuUpdateChain = Promise.resolve();
 
 // --- Installation & Setup ---
 
 if (typeof importScripts === 'function') {
   browserAPI.runtime.onInstalled.addListener(handleInstall);
+  browserAPI.runtime.onStartup?.addListener(() => {
+    updateContextMenu();
+  });
 } else {
   handleInstall({ reason: 'install' });
 }
@@ -55,33 +59,87 @@ async function handleInstall(details) {
 
 // --- Context Menu ---
 
-async function updateContextMenu() {
-  try {
-    await browserAPI.contextMenus.removeAll();
-    const config = await getConfig();
-    const defaultIds = new Set(DEFAULT_PROMPTS.map(p => p.id));
-    const customPrompts = (config.customPrompts || []).filter(
-      p => p?.id && p?.title && p?.prompt && !defaultIds.has(p.id)
-    );
-    const allPrompts = [...DEFAULT_PROMPTS, ...customPrompts];
-
-    await browserAPI.contextMenus.create({
-      id: 'scramble',
-      title: 'Scramble',
-      contexts: ['selection'],
-    });
-
-    for (const prompt of allPrompts) {
-      await browserAPI.contextMenus.create({
-        id: prompt.id,
-        parentId: 'scramble',
-        title: prompt.title,
-        contexts: ['selection'],
+function promisifyChrome(fn) {
+  return new Promise((resolve, reject) => {
+    try {
+      fn((result) => {
+        const err = browserAPI.runtime.lastError;
+        if (err) reject(new Error(err.message));
+        else resolve(result);
       });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function runContextMenuApi(method, ...args) {
+  const apiFn = browserAPI.contextMenus[method];
+  if (!apiFn) throw new Error(`contextMenus.${method} is not available`);
+
+  try {
+    const result = apiFn.call(browserAPI.contextMenus, ...args);
+    if (result && typeof result.then === 'function') {
+      await result;
+      return;
     }
   } catch (error) {
-    console.error('Error updating context menu:', error);
+    throw error;
   }
+
+  await promisifyChrome((done) => apiFn.call(browserAPI.contextMenus, ...args, done));
+}
+
+function removeAllContextMenus() {
+  return runContextMenuApi('removeAll');
+}
+
+async function createContextMenuItem(item) {
+  try {
+    await runContextMenuApi('create', item);
+  } catch (error) {
+    if (/duplicate id/i.test(error.message)) {
+      const { id, parentId, title, contexts } = item;
+      await runContextMenuApi('update', id, { title, contexts, parentId });
+      return;
+    }
+    throw error;
+  }
+}
+
+async function updateContextMenuInternal() {
+  await removeAllContextMenus();
+
+  const config = await getConfig();
+  const defaultIds = new Set(DEFAULT_PROMPTS.map(p => p.id));
+  const customPrompts = (config.customPrompts || []).filter(
+    p => p?.id && p?.title && p?.prompt && !defaultIds.has(p.id)
+  );
+  const allPrompts = [...DEFAULT_PROMPTS, ...customPrompts];
+
+  await createContextMenuItem({
+    id: 'scramble',
+    title: 'Scramble',
+    contexts: ['selection'],
+  });
+
+  for (const prompt of allPrompts) {
+    await createContextMenuItem({
+      id: prompt.id,
+      parentId: 'scramble',
+      title: prompt.title,
+      contexts: ['selection'],
+    });
+  }
+}
+
+function updateContextMenu() {
+  contextMenuUpdateChain = contextMenuUpdateChain
+    .then(() => updateContextMenuInternal())
+    .catch((error) => {
+      console.error('Error updating context menu:', error);
+    });
+  return contextMenuUpdateChain;
 }
 
 browserAPI.storage.onChanged.addListener((changes, area) => {
@@ -107,23 +165,34 @@ async function ensureContentScript(tabId) {
 
   await injectContentScript(tabId);
   await new Promise(r => setTimeout(r, 100));
+
+  await browserAPI.tabs.sendMessage(tabId, { action: 'ping' });
 }
 
 async function injectContentScript(tabId) {
   try {
-    if (browserAPI === chrome && chrome.scripting) {
+    if (chrome.scripting?.executeScript) {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ['content.js']
+        files: ['content.js'],
       });
-    } else if (typeof browser !== 'undefined') {
-      await browser.tabs.executeScript(tabId, { file: 'content.js' });
+      return;
     }
+
+    if (typeof browser !== 'undefined' && browser.tabs?.executeScript) {
+      await browser.tabs.executeScript(tabId, { file: 'content.js' });
+      return;
+    }
+
+    throw new Error('No supported script injection API available in this browser.');
   } catch (error) {
     console.error('Failed to inject content script:', error);
     throw error;
   }
 }
+
+// Build context menus when the service worker starts (covers extension reload).
+updateContextMenu();
 
 // --- Context Menu Click Handler ---
 

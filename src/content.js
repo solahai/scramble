@@ -39,6 +39,22 @@ const PROMPT_ICONS = {
 
 const DEFAULT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 
+function isExtensionInvalidated(error) {
+  const msg = error?.message || String(error || '');
+  return /extension context invalidated|receiving end does not exist|could not establish connection/i.test(msg);
+}
+
+async function sendRuntimeMessage(message) {
+  try {
+    return await browserAPI.runtime.sendMessage(message);
+  } catch (error) {
+    if (isExtensionInvalidated(error)) {
+      throw new Error('Scramble was reloaded. Refresh this page and try again.');
+    }
+    throw error;
+  }
+}
+
 // ========== Selection Helpers ==========
 
 function getPageSelectedText() {
@@ -400,7 +416,7 @@ function createFloatingToolbar(readOnlyHint = false) {
 
 async function loadToolbarActions() {
   try {
-    const response = await browserAPI.runtime.sendMessage({ action: 'getPrompts' });
+    const response = await sendRuntimeMessage({ action: 'getPrompts' });
     if (!response?.success) return;
 
     const actionsContainer = document.getElementById('scramble-toolbar-actions');
@@ -440,6 +456,10 @@ async function loadToolbarActions() {
       actionsContainer.appendChild(undoBtn);
     }
   } catch (error) {
+    if (isExtensionInvalidated(error)) {
+      showToast('Scramble was reloaded. Refresh this page and try again.', 'warning', { duration: 5000 });
+      return;
+    }
     console.error('[Scramble] Error loading toolbar actions:', error);
   }
 }
@@ -603,10 +623,10 @@ async function handleEnhanceText(promptId, selectedText) {
   });
 
   try {
-    const configResp = await browserAPI.runtime.sendMessage({ action: 'getConfig' });
+    const configResp = await sendRuntimeMessage({ action: 'getConfig' });
     const showPreview = configResp?.success ? configResp.config.showPreview !== false : true;
 
-    const response = await browserAPI.runtime.sendMessage({
+    const response = await sendRuntimeMessage({
       action: 'enhanceText',
       promptId,
       selectedText,
