@@ -12,9 +12,21 @@
         }
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            width: 340px;
+            width: 360px;
             background: #ffffff;
             color: #1a1a2e;
+        }
+        @media (prefers-color-scheme: dark) {
+            body { background: #0f172a; color: #e2e8f0; }
+            .info-card { background: #1e293b; border-color: #334155; }
+            .info-title { color: #94a3b8; }
+            .shortcut-row { color: #cbd5e1; border-color: #334155; }
+            .kbd kbd { background: #334155; color: #e2e8f0; border-color: #475569; }
+            .btn-secondary { background: #334155; color: #e2e8f0; border-color: #475569; }
+            .links a { color: #a5b4fc; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .btn { transition: none; }
         }
 
         /* Header */
@@ -214,48 +226,42 @@
                 </svg>
             </div>
             <h1>Scramble</h1>
-            <span class="version" id="version">v1.3</span>
+            <span class="version" id="version"></span>
         </div>
         <div class="subtitle">AI-powered writing assistant</div>
     </div>
 
     <div class="status-section">
-        <div id="status" class="status-card ready">
+        <div id="status" class="status-card ready" role="status" aria-live="polite">
             <div class="status-dot green"></div>
-            <div>
-                <div>Checking status...</div>
-            </div>
+            <div><div>Checking status...</div></div>
         </div>
     </div>
 
     <div class="info-section">
         <div class="info-card">
             <div class="info-title">How to Use</div>
-            <div class="shortcut-row">
-                <span>Select text → right-click → Scramble</span>
-            </div>
-            <div class="shortcut-row">
-                <span>Fix grammar</span>
-                <span class="kbd"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>G</kbd></span>
-            </div>
-            <div class="shortcut-row">
-                <span>Improve writing</span>
-                <span class="kbd"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>I</kbd></span>
-            </div>
-            <div class="shortcut-row">
-                <span>Open toolbar</span>
-                <span class="kbd"><kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd></span>
-            </div>
+            <div class="shortcut-row"><span>Select text in any field → toolbar appears</span></div>
+            <div class="shortcut-row"><span>On read-only pages → right-click → Scramble</span></div>
+            <div id="shortcuts"></div>
+        </div>
+        <div class="info-card" style="margin-top:10px">
+            <div class="info-title">Actions</div>
+            <div class="shortcut-row"><span>Fix grammar, improve, summarize, expand, and more via toolbar or context menu</span></div>
         </div>
     </div>
 
     <div class="actions">
-        <button id="optionsButton" class="btn btn-primary">
+        <button id="optionsButton" class="btn btn-primary" aria-label="Open Scramble settings">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/>
             </svg>
             Open Settings
         </button>
+        <div class="links" style="display:flex;justify-content:center;gap:12px;margin-top:4px;font-size:11px">
+            <a href="https://github.com/solahai/scramble" target="_blank" rel="noopener">GitHub</a>
+            <a href="https://chromewebstore.google.com/detail/scramble/mkaljgnigabhmjfookbokejhfghmkffo" target="_blank" rel="noopener">Chrome Store</a>
+        </div>
     </div>
 
     <script src="popup.js"></script>

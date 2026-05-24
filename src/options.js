@@ -2,25 +2,52 @@ const browserAPI = (typeof browser !== 'undefined' ? browser : chrome);
 
 const DEFAULT_SYSTEM_INSTRUCTION = 'You are a helpful writing assistant. You enhance, correct, and improve text while preserving the author\'s voice and intent. IMPORTANT: Preserve the original paragraph structure and line breaks exactly as they appear. Do not merge paragraphs or remove line breaks. Always return only the processed text without any additional commentary, quotes, or explanation.';
 
+let isDirty = false;
+let savedSnapshot = '';
+
+function markDirty() {
+  isDirty = true;
+}
+
+function clearDirty() {
+  isDirty = false;
+  savedSnapshot = getFormSnapshot();
+}
+
+function getFormSnapshot() {
+  return JSON.stringify({
+    llmProvider: document.getElementById('llmProvider')?.value,
+    apiKey: document.getElementById('apiKey')?.value,
+    llmModel: document.getElementById('llmModel')?.value,
+    customEndpoint: document.getElementById('customEndpoint')?.value,
+    systemInstruction: document.getElementById('systemInstruction')?.value,
+    showPreview: document.getElementById('showPreview')?.checked,
+    customPrompts: getCustomPrompts(),
+  });
+}
+
 // ========== Toggle Sections ==========
 
-function toggleSection(sectionId) {
+function toggleSection(sectionId, toggleBtn) {
   const section = document.getElementById(sectionId);
   const chevron = document.getElementById(`${sectionId}-chevron`);
+  const btn = toggleBtn || document.getElementById(`${sectionId}-toggle`);
   if (section) {
     section.classList.toggle('collapsed');
-    if (chevron) {
-      chevron.style.transform = section.classList.contains('collapsed') ? 'rotate(-90deg)' : '';
-    }
+    const collapsed = section.classList.contains('collapsed');
+    if (chevron) chevron.style.transform = collapsed ? 'rotate(-90deg)' : '';
+    if (btn) btn.setAttribute('aria-expanded', String(!collapsed));
   }
 }
 
-// Make toggleSection available globally for onclick handlers
 window.toggleSection = toggleSection;
 
 // ========== Save Options ==========
 
 async function saveOptions() {
+  const saveButton = document.getElementById('save');
+  if (saveButton?.disabled) return;
+
   try {
     const options = {
       llmProvider: document.getElementById('llmProvider').value,
@@ -30,29 +57,56 @@ async function saveOptions() {
       systemInstruction: document.getElementById('systemInstruction').value.trim() || DEFAULT_SYSTEM_INSTRUCTION,
       temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
       maxTokens: parseInt(document.getElementById('maxTokens').value) || 2048,
+      showPreview: document.getElementById('showPreview').checked,
       customPrompts: getCustomPrompts(),
+      onboardingComplete: true,
     };
 
-    // Validate
     if (!['ollama', 'lmstudio'].includes(options.llmProvider) && !options.apiKey) {
       showMessage('Please enter an API key for your provider.', 'warning');
       return;
     }
 
+    if (['ollama', 'lmstudio'].includes(options.llmProvider) && !options.llmModel) {
+      showMessage('Please enter a model name for your local provider.', 'warning');
+      return;
+    }
+
+    if (!options.llmModel) {
+      showMessage('Please enter a model name.', 'warning');
+      return;
+    }
+
+    if (saveButton) {
+      saveButton.disabled = true;
+      saveButton.textContent = 'Saving…';
+    }
+
     await new Promise((resolve, reject) => {
       browserAPI.storage.sync.set(options, () => {
         if (browserAPI.runtime.lastError) {
-          reject(browserAPI.runtime.lastError);
+          reject(new Error(browserAPI.runtime.lastError.message));
         } else {
           resolve();
         }
       });
     });
 
-    showMessage('Settings saved successfully!', 'success');
+    clearDirty();
+    document.getElementById('onboarding-banner')?.classList.add('hidden');
+    showMessage('Settings saved successfully!', 'success', 6000);
   } catch (error) {
     console.error('Error saving options:', error);
-    showMessage('Error saving settings. Please try again.', 'error');
+    const msg = /QUOTA|quota|MAX_WRITE|max/i.test(error.message)
+      ? 'Settings too large for sync storage. Try shortening system instructions or removing custom prompts.'
+      : 'Error saving settings. Please try again.';
+    showMessage(msg, 'error');
+  } finally {
+    const saveButton = document.getElementById('save');
+    if (saveButton) {
+      saveButton.disabled = false;
+      saveButton.textContent = 'Save Changes';
+    }
   }
 }
 
@@ -61,11 +115,18 @@ async function saveOptions() {
 function getCustomPrompts() {
   try {
     const promptContainers = document.querySelectorAll('.prompt-container');
-    return Array.from(promptContainers).map(container => ({
-      id: snakeCase(container.querySelector('.prompt-title').value || ''),
-      title: container.querySelector('.prompt-title').value || '',
-      prompt: container.querySelector('.prompt-text').value || ''
-    })).filter(prompt => prompt.title && prompt.prompt);
+    const usedIds = new Set();
+    return Array.from(promptContainers).map(container => {
+      const title = container.querySelector('.prompt-title').value || '';
+      const prompt = container.querySelector('.prompt-text').value || '';
+      const existingId = container.querySelector('.prompt-id')?.value;
+      let id = existingId || snakeCase(title);
+      while (usedIds.has(id)) {
+        id = `${id}_${usedIds.size}`;
+      }
+      usedIds.add(id);
+      return { id, title, prompt };
+    }).filter(p => p.title && p.prompt);
   } catch (error) {
     console.error('Error getting custom prompts:', error);
     return [];
@@ -106,10 +167,12 @@ function addPromptToUI(title = '', prompt = '', id = '') {
       const deleteButton = container.querySelector('.delete-prompt');
       if (deleteButton) {
         deleteButton.addEventListener('click', function () {
+          if (!confirm('Delete this custom prompt? This cannot be undone until you save.')) return;
           container.classList.add('opacity-0', 'scale-95');
           container.style.transition = 'all 0.2s ease';
           setTimeout(() => {
             container.remove();
+            markDirty();
           }, 200);
         });
       }
@@ -135,6 +198,8 @@ async function restoreOptions() {
       systemInstruction: DEFAULT_SYSTEM_INSTRUCTION,
       temperature: 0.7,
       maxTokens: 2048,
+      showPreview: true,
+      onboardingComplete: false,
     };
 
     const items = await new Promise(resolve => {
@@ -160,6 +225,13 @@ async function restoreOptions() {
     const maxTokensEl = document.getElementById('maxTokens');
     if (maxTokensEl) maxTokensEl.value = items.maxTokens ?? 2048;
 
+    const showPreviewEl = document.getElementById('showPreview');
+    if (showPreviewEl) showPreviewEl.checked = items.showPreview !== false;
+
+    if (!items.onboardingComplete) {
+      document.getElementById('onboarding-banner')?.classList.remove('hidden');
+    }
+
     // Clear existing prompts before restoring
     const promptsContainer = document.getElementById('prompts-container');
     while (promptsContainer.firstChild) {
@@ -174,6 +246,7 @@ async function restoreOptions() {
     }
 
     updateUIForProvider(items.llmProvider);
+    clearDirty();
   } catch (error) {
     console.error('Error restoring options:', error);
     showMessage('Error loading settings. Please try reloading the page.', 'error');
@@ -193,6 +266,7 @@ function updateUIForProvider(provider) {
     const endpointHelp = document.getElementById('endpointHelp');
     const fetchModelsButton = document.getElementById('fetchModels');
     const availableModelsSelect = document.getElementById('availableModels');
+    const apiKeyWrapper = document.getElementById('apiKeyFieldWrapper');
 
     // Reset model dropdown
     if (availableModelsSelect) {
@@ -201,7 +275,7 @@ function updateUIForProvider(provider) {
     }
 
     // Show fetch models for compatible providers
-    const canFetchModels = ['openai', 'lmstudio', 'ollama', 'openrouter', 'groq'].includes(provider);
+    const canFetchModels = ['openai', 'anthropic', 'lmstudio', 'ollama', 'openrouter', 'groq'].includes(provider);
     if (fetchModelsButton) {
       fetchModelsButton.style.display = canFetchModels ? 'inline-flex' : 'none';
     }
@@ -235,7 +309,7 @@ function updateUIForProvider(provider) {
         modelHelp: 'Run "ollama list" to see available models',
         endpoint: 'http://localhost:11434/api/generate (default)',
         endpointHelp: 'Make sure Ollama is running locally',
-        showApiKey: true,
+        showApiKey: false,
       },
       lmstudio: {
         label: 'API Key (Optional)',
@@ -245,7 +319,7 @@ function updateUIForProvider(provider) {
         modelHelp: 'Use the exact model name from LM Studio',
         endpoint: 'http://localhost:1234/v1/chat/completions (default)',
         endpointHelp: 'Ensure LM Studio server is running',
-        showApiKey: true,
+        showApiKey: false,
       },
       groq: {
         label: 'Groq API Key',
@@ -279,6 +353,9 @@ function updateUIForProvider(provider) {
     if (modelHelp) modelHelp.textContent = config.modelHelp;
     if (customEndpointInput) customEndpointInput.placeholder = config.endpoint;
     if (endpointHelp) endpointHelp.textContent = config.endpointHelp;
+    if (apiKeyWrapper) {
+      apiKeyWrapper.style.display = config.showApiKey ? 'block' : 'none';
+    }
   } catch (error) {
     console.error('Error updating UI for provider:', error);
   }
@@ -325,6 +402,14 @@ async function fetchAvailableModels() {
         endpoint = customEndpoint ? customEndpoint.replace('/chat/completions', '/models') : 'https://api.groq.com/openai/v1/models';
         if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
         break;
+      case 'anthropic':
+        endpoint = 'https://api.anthropic.com/v1/models';
+        if (apiKey) {
+          headers['x-api-key'] = apiKey;
+          headers['anthropic-version'] = '2023-06-01';
+          headers['anthropic-dangerous-direct-browser-access'] = 'true';
+        }
+        break;
       default:
         throw new Error(`Model fetching not supported for ${provider}`);
     }
@@ -344,6 +429,9 @@ async function fetchAvailableModels() {
         break;
       case 'openrouter':
         models = data.data ? data.data.map(m => ({ id: m.id, name: m.name || m.id })) : [];
+        break;
+      case 'anthropic':
+        models = data.data ? data.data.map(m => ({ id: m.id, name: m.display_name || m.id })) : [];
         break;
       default:
         models = data.data ? data.data.map(m => ({ id: m.id, name: m.id })) : [];
@@ -375,7 +463,15 @@ async function fetchAvailableModels() {
 
 // ========== Status Messages ==========
 
-function showMessage(message, type = 'info') {
+function friendlySettingsError(message) {
+  if (/401|403|Incorrect API key|invalid.*key|authentication/i.test(message)) {
+    return 'Invalid API key. Check your key in the fields above and try again.';
+  }
+  if (/timed out|timeout/i.test(message)) return 'Connection timed out. Check your network and endpoint URL.';
+  return message;
+}
+
+function showMessage(message, type = 'info', duration = 3000) {
   const status = document.getElementById('status');
   if (!status) return;
 
@@ -386,20 +482,50 @@ function showMessage(message, type = 'info') {
     info: 'text-blue-600',
   };
 
-  const icons = {
-    success: '✓',
-    error: '✕',
-    warning: '⚠',
-    info: 'ℹ',
-  };
+  const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
+  const display = type === 'error' ? friendlySettingsError(message) : message;
 
   status.className = `text-sm flex items-center gap-2 ${colors[type] || colors.info}`;
-  status.innerHTML = `<span>${icons[type] || ''}</span> ${message}`;
+  status.innerHTML = `<span>${icons[type] || ''}</span> ${display}`;
 
   if (type !== 'error') {
-    setTimeout(() => {
-      status.innerHTML = '';
-    }, 3000);
+    setTimeout(() => { status.innerHTML = ''; }, duration);
+  }
+}
+
+async function testConnection() {
+  const btn = document.getElementById('testConnection');
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+
+  try {
+    const config = {
+      llmProvider: document.getElementById('llmProvider').value,
+      apiKey: document.getElementById('apiKey').value.trim(),
+      llmModel: document.getElementById('llmModel').value.trim(),
+      customEndpoint: document.getElementById('customEndpoint').value.trim(),
+      temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
+      maxTokens: parseInt(document.getElementById('maxTokens').value) || 2048,
+    };
+
+    if (!['ollama', 'lmstudio'].includes(config.llmProvider) && !config.apiKey) {
+      showMessage('Enter an API key before testing.', 'warning');
+      return;
+    }
+    if (!config.llmModel) {
+      showMessage('Enter a model name before testing.', 'warning');
+      return;
+    }
+
+    const response = await browserAPI.runtime.sendMessage({ action: 'testConnection', config });
+    if (response.success) {
+      showMessage(`${response.message} Sample: "${response.sample}…"`, 'success', 8000);
+    } else {
+      showMessage(friendlySettingsError(response.error), 'error');
+    }
+  } catch (error) {
+    showMessage(friendlySettingsError(error.message), 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
   }
 }
 
@@ -408,9 +534,34 @@ function showMessage(message, type = 'info') {
 document.addEventListener('DOMContentLoaded', () => {
   restoreOptions();
 
-  // Save
+  ['system-section', 'llm-section', 'prompts-section'].forEach(id => {
+    const btn = document.getElementById(`${id}-toggle`);
+    if (btn) {
+      btn.addEventListener('click', () => toggleSection(id, btn));
+    }
+  });
+
+  document.querySelectorAll('input, select, textarea').forEach(el => {
+    el.addEventListener('input', () => {
+      if (savedSnapshot && getFormSnapshot() !== savedSnapshot) markDirty();
+    });
+    el.addEventListener('change', () => {
+      if (savedSnapshot && getFormSnapshot() !== savedSnapshot) markDirty();
+    });
+  });
+
+  window.addEventListener('beforeunload', (e) => {
+    if (isDirty || (savedSnapshot && getFormSnapshot() !== savedSnapshot)) {
+      e.preventDefault();
+      e.returnValue = '';
+    }
+  });
+
   const saveButton = document.getElementById('save');
   if (saveButton) saveButton.addEventListener('click', saveOptions);
+
+  const testBtn = document.getElementById('testConnection');
+  if (testBtn) testBtn.addEventListener('click', testConnection);
 
   // Provider change
   const providerSelect = document.getElementById('llmProvider');
@@ -467,8 +618,10 @@ document.addEventListener('DOMContentLoaded', () => {
     toggleApiKey.addEventListener('click', () => {
       const apiKeyInput = document.getElementById('apiKey');
       if (apiKeyInput) {
-        apiKeyInput.classList.toggle('revealed');
-        apiKeyInput.classList.toggle('api-key-field');
+        const revealed = apiKeyInput.type === 'text';
+        apiKeyInput.type = revealed ? 'password' : 'text';
+        apiKeyInput.classList.toggle('revealed', !revealed);
+        apiKeyInput.classList.toggle('api-key-field', revealed);
       }
     });
   }
