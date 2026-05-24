@@ -485,10 +485,10 @@ function scheduleAutoHide() {
   }, 15000);
 }
 
-function hideFloatingToolbar() {
-  if (isProcessing) return;
+function hideFloatingToolbar(force = false) {
+  if (isProcessing && !force) return;
   clearTimeout(autoHideTimeout);
-  toolbarPinned = false;
+  if (!isProcessing) toolbarPinned = false;
   if (scrambleToolbar) {
     scrambleToolbar.classList.remove('scramble-visible');
     setTimeout(() => {
@@ -592,6 +592,8 @@ async function handleEnhanceText(promptId, selectedText) {
   clearTimeout(autoHideTimeout);
   currentRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 
+  hideFloatingToolbar(true);
+
   showLoadingToast('Enhancing…', () => {
     browserAPI.runtime.sendMessage({ action: 'cancelEnhancement', requestId: currentRequestId }).catch(() => {});
     isProcessing = false;
@@ -666,6 +668,7 @@ function buildApplySnapshot(originalText, enhancedText) {
 
 function showPreviewModal(original, enhanced) {
   ensureStyles();
+  hideFloatingToolbar(true);
   return new Promise((resolve) => {
     const overlay = document.createElement('div');
     overlay.id = 'scramble-preview-overlay';
@@ -1079,10 +1082,16 @@ function getScrambleStyles() {
     @keyframes scramble-spin { to { transform: rotate(360deg); } }
     #scramble-preview-overlay {
       position: fixed; inset: 0; z-index: 2147483647;
-      background: rgba(15,23,42,0.5); display: flex; align-items: center; justify-content: center;
-      padding: 16px; font-family: inherit;
+      background: rgba(15,23,42,0.72); display: flex; align-items: center; justify-content: center;
+      padding: 16px; font-family: inherit; isolation: isolate;
+    }
+    #scramble-preview-overlay ~ #scramble-toolbar,
+    body:has(#scramble-preview-overlay) #scramble-toolbar {
+      display: none !important;
+      pointer-events: none !important;
     }
     .scramble-preview-modal {
+      position: relative; z-index: 1;
       background: #fff; border-radius: 12px; max-width: 720px; width: 100%;
       max-height: 85vh; display: flex; flex-direction: column;
       box-shadow: 0 20px 50px rgba(0,0,0,0.25);

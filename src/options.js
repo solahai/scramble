@@ -21,7 +21,7 @@ function getFormSnapshot() {
     llmModel: document.getElementById('llmModel')?.value,
     customEndpoint: document.getElementById('customEndpoint')?.value,
     systemInstruction: document.getElementById('systemInstruction')?.value,
-    showPreview: document.getElementById('showPreview')?.checked,
+    showPreview: getShowPreviewSetting(),
     customPrompts: getCustomPrompts(),
   });
 }
@@ -42,6 +42,27 @@ function toggleSection(sectionId, toggleBtn) {
 
 window.toggleSection = toggleSection;
 
+function syncBehaviorCheckboxes(changedId) {
+  const autoApplyEl = document.getElementById('autoApply');
+  const showPreviewEl = document.getElementById('showPreview');
+  if (!autoApplyEl || !showPreviewEl) return;
+
+  if (changedId === 'autoApply' && autoApplyEl.checked) {
+    showPreviewEl.checked = false;
+  } else if (changedId === 'showPreview' && showPreviewEl.checked) {
+    autoApplyEl.checked = false;
+  } else if (!autoApplyEl.checked && !showPreviewEl.checked) {
+    showPreviewEl.checked = true;
+  }
+}
+
+function getShowPreviewSetting() {
+  const autoApplyEl = document.getElementById('autoApply');
+  if (autoApplyEl?.checked) return false;
+  const showPreviewEl = document.getElementById('showPreview');
+  return showPreviewEl ? showPreviewEl.checked : true;
+}
+
 // ========== Save Options ==========
 
 async function saveOptions() {
@@ -57,7 +78,7 @@ async function saveOptions() {
       systemInstruction: document.getElementById('systemInstruction').value.trim() || DEFAULT_SYSTEM_INSTRUCTION,
       temperature: parseFloat(document.getElementById('temperature').value) || 0.7,
       maxTokens: parseInt(document.getElementById('maxTokens').value) || 2048,
-      showPreview: document.getElementById('showPreview').checked,
+      showPreview: getShowPreviewSetting(),
       customPrompts: getCustomPrompts(),
       onboardingComplete: true,
     };
@@ -232,7 +253,10 @@ async function restoreOptions() {
     if (maxTokensEl) maxTokensEl.value = items.maxTokens ?? 2048;
 
     const showPreviewEl = document.getElementById('showPreview');
-    if (showPreviewEl) showPreviewEl.checked = items.showPreview !== false;
+    const autoApplyEl = document.getElementById('autoApply');
+    const previewEnabled = items.showPreview !== false;
+    if (showPreviewEl) showPreviewEl.checked = previewEnabled;
+    if (autoApplyEl) autoApplyEl.checked = !previewEnabled;
 
     if (!items.onboardingComplete) {
       document.getElementById('onboarding-banner')?.classList.remove('hidden');
@@ -546,6 +570,21 @@ document.addEventListener('DOMContentLoaded', () => {
       btn.addEventListener('click', () => toggleSection(id, btn));
     }
   });
+
+  const autoApplyEl = document.getElementById('autoApply');
+  const showPreviewEl = document.getElementById('showPreview');
+  if (autoApplyEl) {
+    autoApplyEl.addEventListener('change', () => {
+      syncBehaviorCheckboxes('autoApply');
+      markDirty();
+    });
+  }
+  if (showPreviewEl) {
+    showPreviewEl.addEventListener('change', () => {
+      syncBehaviorCheckboxes('showPreview');
+      markDirty();
+    });
+  }
 
   document.querySelectorAll('input, select, textarea').forEach(el => {
     el.addEventListener('input', () => {
