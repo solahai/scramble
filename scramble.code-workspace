@@ -1,0 +1,11 @@
+{
+  "folders": [
+    {
+      "name": "Scramble",
+      "path": "."
+    }
+  ],
+  "settings": {
+    "git.repositoryScanMaxDepth": 1
+  }
+}
