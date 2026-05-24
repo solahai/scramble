@@ -1,5 +1,11 @@
 const browserAPI = (typeof browser !== 'undefined' ? browser : chrome);
 
+// Prevent duplicate listeners when the content script is injected twice.
+const SCRAMBLE_ALREADY_LOADED = !!globalThis.__scrambleContentLoaded;
+if (!SCRAMBLE_ALREADY_LOADED) {
+  globalThis.__scrambleContentLoaded = true;
+}
+
 // ========== State ==========
 let scrambleToolbar = null;
 let undoStack = [];
@@ -14,6 +20,9 @@ let isProcessing = false;
 let autoHideTimeout = null;
 let currentRequestId = null;
 let toolbarPinned = false;
+let previewModalResolve = null;
+
+const TEXT_INPUT_TYPES = ['text', 'search', 'email', 'url', 'tel', 'password', ''];
 
 const PROMPT_ICONS = {
   fix_grammar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
@@ -30,8 +39,27 @@ const PROMPT_ICONS = {
 
 const DEFAULT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 
+// ========== Selection Helpers ==========
+
+function getPageSelectedText() {
+  const active = document.activeElement;
+  if (isTextInputElement(active)) {
+    const start = active.selectionStart;
+    const end = active.selectionEnd;
+    if (start != null && end != null && start !== end) {
+      return active.value.substring(start, end).trim();
+    }
+  }
+  return window.getSelection()?.toString()?.trim() || '';
+}
+
+function captureSelectionFromPage() {
+  const text = getPageSelectedText();
+  if (text) captureSelectionState(text);
+}
+
 // ========== Message Listener ==========
-browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
+function handleRuntimeMessage(request, sender, sendResponse) {
   if (request.action === 'ping') {
     sendResponse({ success: true });
     return;
@@ -50,8 +78,16 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'enhanceText') {
-    captureSelectionState(request.selectedText);
-    handleEnhanceText(request.promptId, request.selectedText)
+    const text = request.selectedText?.trim();
+    if (!text) {
+      showToast('Please select some text first.', 'warning');
+      sendResponse({ success: false, error: 'No text selected' });
+      return;
+    }
+    if (!hasValidReplaceTarget() || savedSelectedText !== text) {
+      captureSelectionState(text);
+    }
+    handleEnhanceText(request.promptId, text)
       .then(() => sendResponse({ success: true }))
       .catch(error => {
         dismissToast();
@@ -62,10 +98,11 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'triggerFromShortcut') {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString()?.trim();
+    const selectedText = getPageSelectedText();
     if (selectedText) {
-      captureSelectionState(selectedText);
+      if (!hasValidReplaceTarget() || savedSelectedText !== selectedText) {
+        captureSelectionState(selectedText);
+      }
       handleEnhanceText(request.promptId, selectedText)
         .then(() => sendResponse({ success: true }))
         .catch(error => {
@@ -81,20 +118,63 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 
   if (request.action === 'showToolbar') {
+    const selectedText = getPageSelectedText();
     const selection = window.getSelection();
-    const selectedText = selection?.toString()?.trim();
-    if (selectedText && selection.rangeCount > 0) {
-      const range = selection.getRangeAt(0);
-      showFloatingToolbar(range.getBoundingClientRect(), true);
+    if (selectedText) {
+      if (!hasValidReplaceTarget() || savedSelectedText !== selectedText) {
+        captureSelectionState(selectedText);
+      }
+      const rect = selection?.rangeCount > 0
+        ? selection.getRangeAt(0).getBoundingClientRect()
+        : { bottom: 100, left: 100, right: 400, top: 80, width: 300, height: 20 };
+      showFloatingToolbar(rect, true);
     } else {
       showToast('Select some text to use Scramble.', 'info');
     }
     sendResponse({ success: true });
     return;
   }
-});
+}
 
 // ========== Selection Capture ==========
+
+function isTextInputElement(el) {
+  return el && (
+    el.tagName === 'TEXTAREA' ||
+    (el.tagName === 'INPUT' && TEXT_INPUT_TYPES.includes(el.type))
+  );
+}
+
+function hasValidReplaceTarget() {
+  if (!savedSelectedText) return false;
+  if (selectionSnapshot?.type === 'input' && savedActiveElement && document.body.contains(savedActiveElement)) {
+    return savedSelectionStart != null && savedSelectionEnd != null;
+  }
+  if (selectionSnapshot?.type === 'contenteditable' && savedRange) return true;
+  if (selectionSnapshot?.type === 'range' && savedRange) return true;
+  return false;
+}
+
+function findInputFieldForText(text) {
+  if (!text) return null;
+
+  const active = document.activeElement;
+  if (isTextInputElement(active)) {
+    const idx = active.value.indexOf(text);
+    if (idx >= 0) {
+      return { element: active, start: idx, end: idx + text.length };
+    }
+  }
+
+  for (const el of document.querySelectorAll('textarea, input')) {
+    if (!isTextInputElement(el)) continue;
+    const idx = el.value.indexOf(text);
+    if (idx >= 0) {
+      return { element: el, start: idx, end: idx + text.length };
+    }
+  }
+  return null;
+}
 
 function captureSelectionState(fallbackText) {
   const selection = window.getSelection();
@@ -108,10 +188,7 @@ function captureSelectionState(fallbackText) {
   savedSelectionEnd = null;
   selectionSnapshot = { type: 'none', originalText: savedSelectedText };
 
-  const isTextInput = active && (
-    active.tagName === 'TEXTAREA' ||
-    (active.tagName === 'INPUT' && ['text', 'search', 'email', 'url', 'tel', 'password'].includes(active.type))
-  );
+  const isTextInput = isTextInputElement(active);
 
   if (isTextInput) {
     savedActiveElement = active;
@@ -170,6 +247,33 @@ function captureSelectionState(fallbackText) {
   }
 
   if (savedSelectedText) {
+    const inputMatch = findInputFieldForText(savedSelectedText);
+    if (inputMatch) {
+      savedActiveElement = inputMatch.element;
+      savedSelectionStart = inputMatch.start;
+      savedSelectionEnd = inputMatch.end;
+      selectionSnapshot = {
+        type: 'input',
+        element: inputMatch.element,
+        start: inputMatch.start,
+        end: inputMatch.end,
+        originalText: savedSelectedText,
+        fullValue: inputMatch.element.value,
+      };
+      return;
+    }
+
+    const bodyRange = findRangeForText(document.body, savedSelectedText);
+    if (bodyRange) {
+      savedRange = bodyRange;
+      selectionSnapshot = {
+        type: 'range',
+        range: bodyRange.cloneRange(),
+        originalText: savedSelectedText,
+      };
+      return;
+    }
+
     selectionSnapshot = {
       type: 'clipboard',
       originalText: savedSelectedText,
@@ -179,6 +283,8 @@ function captureSelectionState(fallbackText) {
 }
 
 function findRangeForText(root, text) {
+  if (!text) return null;
+
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let node;
   while ((node = walker.nextNode())) {
@@ -190,7 +296,47 @@ function findRangeForText(root, text) {
       return range;
     }
   }
-  return null;
+
+  // Selection may span multiple text nodes — walk and match across boundaries.
+  const textNodes = [];
+  const nodeWalker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  while ((node = nodeWalker.nextNode())) {
+    if (node.textContent) textNodes.push(node);
+  }
+
+  const combined = textNodes.map(n => n.textContent).join('');
+  const combinedIndex = combined.indexOf(text);
+  if (combinedIndex < 0) return null;
+
+  let offset = 0;
+  let startNode = null;
+  let startOffset = 0;
+  let endNode = null;
+  let endOffset = 0;
+  const endIndex = combinedIndex + text.length;
+
+  for (const textNode of textNodes) {
+    const nodeStart = offset;
+    const nodeEnd = offset + textNode.textContent.length;
+
+    if (!startNode && combinedIndex >= nodeStart && combinedIndex < nodeEnd) {
+      startNode = textNode;
+      startOffset = combinedIndex - nodeStart;
+    }
+    if (endIndex > nodeStart && endIndex <= nodeEnd) {
+      endNode = textNode;
+      endOffset = endIndex - nodeStart;
+      break;
+    }
+    offset = nodeEnd;
+  }
+
+  if (!startNode || !endNode) return null;
+
+  const range = document.createRange();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  return range;
 }
 
 function restoreSelectionSnapshot(snapshot) {
@@ -209,7 +355,7 @@ function isEditableContext(node) {
   if (!node) return false;
   const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
   if (!el) return false;
-  if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text')) return true;
+  if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && TEXT_INPUT_TYPES.includes(el.type))) return true;
   if (el.isContentEditable) return true;
   let parent = el.parentElement;
   while (parent) {
@@ -255,7 +401,7 @@ function createFloatingToolbar(readOnlyHint = false) {
 async function loadToolbarActions() {
   try {
     const response = await browserAPI.runtime.sendMessage({ action: 'getPrompts' });
-    if (!response.success) return;
+    if (!response?.success) return;
 
     const actionsContainer = document.getElementById('scramble-toolbar-actions');
     if (!actionsContainer) return;
@@ -299,10 +445,17 @@ async function loadToolbarActions() {
 }
 
 function showFloatingToolbar(rect, forceShow = false) {
-  captureSelectionState();
+  const text = getPageSelectedText();
+  if (text) {
+    if (!hasValidReplaceTarget() || savedSelectedText !== text) {
+      captureSelectionState(text);
+    }
+  } else if (!hasValidReplaceTarget()) {
+    return;
+  }
 
   const selection = window.getSelection();
-  const editable = isEditableContext(selection?.anchorNode);
+  const editable = isEditableContext(selection?.anchorNode) || selectionSnapshot?.type === 'input';
   if (!editable && !forceShow) {
     hideFloatingToolbar();
     return;
@@ -346,65 +499,83 @@ function hideFloatingToolbar() {
 }
 
 let selectionTimeout = null;
-document.addEventListener('mouseup', (e) => {
-  if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) return;
 
-  clearTimeout(selectionTimeout);
-  selectionTimeout = setTimeout(() => {
-    const selection = window.getSelection();
-    const selectedText = selection?.toString()?.trim();
+function bindPageEventListeners() {
+  document.addEventListener('contextmenu', () => {
+    captureSelectionFromPage();
+  }, true);
 
-    if (selectedText && selectedText.length > 2) {
-      const anchorNode = selection.anchorNode;
-      if (isEditableContext(anchorNode)) {
-        showFloatingToolbar(selection.getRangeAt(0).getBoundingClientRect());
-      } else {
-        showFloatingToolbar(selection.getRangeAt(0).getBoundingClientRect(), true);
+  document.addEventListener('mouseup', (e) => {
+    if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) return;
+
+    captureSelectionFromPage();
+
+    clearTimeout(selectionTimeout);
+    selectionTimeout = setTimeout(() => {
+      const selectedText = getPageSelectedText();
+
+      if (selectedText && selectedText.length > 2) {
+        const selection = window.getSelection();
+        const anchorNode = selection?.anchorNode;
+        const rect = selection?.rangeCount > 0
+          ? selection.getRangeAt(0).getBoundingClientRect()
+          : { bottom: 100, left: 100, right: 400, top: 80, width: 300, height: 20 };
+        if (isEditableContext(anchorNode) || isTextInputElement(document.activeElement)) {
+          showFloatingToolbar(rect);
+        } else {
+          showFloatingToolbar(rect, true);
+        }
+      } else if (!isProcessing) {
+        hideFloatingToolbar();
       }
-    } else if (!isProcessing) {
+    }, 400);
+  });
+
+  document.addEventListener('mousedown', (e) => {
+    if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) {
+      toolbarPinned = true;
+      return;
+    }
+    if (scrambleToolbar && !isProcessing) {
       hideFloatingToolbar();
     }
-  }, 400);
-});
+  });
 
-document.addEventListener('mousedown', (e) => {
-  if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) {
-    toolbarPinned = true;
-    return;
-  }
-  if (scrambleToolbar && !isProcessing) {
-    hideFloatingToolbar();
-  }
-});
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') {
-    if (document.getElementById('scramble-preview-overlay')) {
-      closePreviewModal(false);
-    } else if (isProcessing && currentRequestId) {
-      browserAPI.runtime.sendMessage({ action: 'cancelEnhancement', requestId: currentRequestId }).catch(() => {});
-      isProcessing = false;
-      currentRequestId = null;
-      dismissToast();
-      showToast('Cancelled.', 'info');
-    } else {
-      hideFloatingToolbar();
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (document.getElementById('scramble-preview-overlay')) {
+        closePreviewModal(false);
+      } else if (isProcessing && currentRequestId) {
+        browserAPI.runtime.sendMessage({ action: 'cancelEnhancement', requestId: currentRequestId }).catch(() => {});
+        isProcessing = false;
+        currentRequestId = null;
+        dismissToast();
+        showToast('Cancelled.', 'info');
+      } else {
+        hideFloatingToolbar();
+      }
     }
-  }
-});
+  });
 
-window.addEventListener('blur', () => {
-  setTimeout(() => {
-    if (!document.hasFocus() && !isProcessing && !document.getElementById('scramble-preview-overlay')) {
-      hideFloatingToolbar();
-    }
-  }, 200);
-});
-
+  window.addEventListener('blur', () => {
+    setTimeout(() => {
+      if (!document.hasFocus() && !isProcessing && !document.getElementById('scramble-preview-overlay')) {
+        hideFloatingToolbar();
+      }
+    }, 200);
+  });
+}
 // ========== Text Enhancement ==========
 
 async function handleEnhanceText(promptId, selectedText) {
-  if (!selectionSnapshot) captureSelectionState(selectedText);
+  if (!selectedText?.trim()) {
+    showToast('Please select some text first.', 'warning');
+    return;
+  }
+
+  if (!selectionSnapshot || !hasValidReplaceTarget()) {
+    captureSelectionState(selectedText);
+  }
 
   const snapshotForRestore = {
     type: selectionSnapshot?.type,
@@ -431,7 +602,7 @@ async function handleEnhanceText(promptId, selectedText) {
 
   try {
     const configResp = await browserAPI.runtime.sendMessage({ action: 'getConfig' });
-    const showPreview = configResp.success ? configResp.config.showPreview !== false : true;
+    const showPreview = configResp?.success ? configResp.config.showPreview !== false : true;
 
     const response = await browserAPI.runtime.sendMessage({
       action: 'enhanceText',
@@ -457,11 +628,13 @@ async function handleEnhanceText(promptId, selectedText) {
     restoreSelectionSnapshot(snapshotForRestore);
 
     const applySnapshot = buildApplySnapshot(selectedText, response.enhancedText);
-    replaceSelectedText(response.enhancedText);
-    applySnapshot.end = applySnapshot.start + response.enhancedText.length;
-    saveUndoState(applySnapshot);
-    showToast('Done!', 'success');
-    hideFloatingToolbar();
+    const applied = replaceSelectedText(response.enhancedText);
+    if (applied) {
+      applySnapshot.end = applySnapshot.start + response.enhancedText.length;
+      saveUndoState(applySnapshot);
+      showToast('Done!', 'success');
+      hideFloatingToolbar();
+    }
   } catch (error) {
     dismissToast();
     if (error.message !== 'Cancelled') {
@@ -526,31 +699,70 @@ function showPreviewModal(original, enhanced) {
     overlay.querySelector('#scramble-preview-enhanced').textContent = enhanced;
 
     const cleanup = (accepted) => {
+      previewModalResolve = null;
       overlay.remove();
       resolve(accepted);
     };
+
+    previewModalResolve = resolve;
 
     overlay.querySelector('#scramble-preview-accept').addEventListener('click', () => cleanup(true));
     overlay.querySelector('#scramble-preview-reject').addEventListener('click', () => cleanup(false));
     overlay.addEventListener('click', (e) => {
       if (e.target === overlay) cleanup(false);
     });
+    overlay.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') cleanup(true);
+    });
+    overlay.querySelector('.scramble-preview-accept')?.focus();
   });
 }
 
-function closePreviewModal(accepted) {
-  document.getElementById('scramble-preview-overlay')?.remove();
+function closePreviewModal(accepted = false) {
+  const overlay = document.getElementById('scramble-preview-overlay');
+  if (!overlay) return;
+  overlay.remove();
+  if (previewModalResolve) {
+    const resolve = previewModalResolve;
+    previewModalResolve = null;
+    resolve(accepted);
+  }
 }
 
 // ========== Text Replacement ==========
+
+function setNativeInputValue(el, value) {
+  const proto = el.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+  if (setter) setter.call(el, value);
+  else el.value = value;
+
+  try {
+    el.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      cancelable: true,
+      inputType: 'insertReplacementText',
+      data: value,
+    }));
+  } catch {
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
 
 function replaceSelectedText(enhancedText) {
   const activeElement = savedActiveElement || document.activeElement;
   const canReplaceInPlace = selectionSnapshot?.type !== 'clipboard' || selectionSnapshot?.editable;
 
-  if (activeElement && (activeElement.tagName === 'TEXTAREA' || (activeElement.tagName === 'INPUT' && activeElement.type === 'text'))) {
+  if (isTextInputElement(activeElement)) {
     const start = savedSelectionStart ?? activeElement.selectionStart;
     const end = savedSelectionEnd ?? activeElement.selectionEnd;
+    if (start == null || end == null || start === end) {
+      navigator.clipboard?.writeText(enhancedText);
+      showToast('Could not locate selection — enhanced text copied to clipboard.', 'info', { duration: 4000 });
+      return false;
+    }
+
     const text = activeElement.value;
     const originalSelection = text.substring(start, end);
     const preservedText = preserveLineBreaks(originalSelection, enhancedText);
@@ -558,27 +770,22 @@ function replaceSelectedText(enhancedText) {
     activeElement.focus();
     activeElement.setSelectionRange(start, end);
     if (!document.execCommand('insertText', false, preservedText)) {
-      activeElement.value = text.substring(0, start) + preservedText + text.substring(end);
+      const newValue = text.substring(0, start) + preservedText + text.substring(end);
+      setNativeInputValue(activeElement, newValue);
+    } else {
+      setNativeInputValue(activeElement, activeElement.value);
     }
 
     const newPos = start + preservedText.length;
     activeElement.setSelectionRange(newPos, newPos);
-    activeElement.dispatchEvent(new Event('input', { bubbles: true }));
-    activeElement.dispatchEvent(new Event('change', { bubbles: true }));
-
-    const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
-      window.HTMLTextAreaElement?.prototype || window.HTMLInputElement.prototype,
-      'value'
-    )?.set;
-    if (nativeInputValueSetter) {
-      nativeInputValueSetter.call(activeElement, activeElement.value);
-      activeElement.dispatchEvent(new Event('input', { bubbles: true }));
-    }
-    return;
+    return true;
   }
 
-  if (activeElement && activeElement.isContentEditable && savedRange) {
-    activeElement.focus();
+  const editableElement = (savedActiveElement?.isContentEditable && savedActiveElement)
+    || (activeElement?.isContentEditable ? activeElement : null);
+
+  if (editableElement && savedRange) {
+    editableElement.focus();
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(savedRange);
@@ -640,8 +847,8 @@ function replaceSelectedText(enhancedText) {
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
-    activeElement.dispatchEvent(new Event('input', { bubbles: true }));
-    return;
+    editableElement.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
   }
 
   if (savedRange && canReplaceInPlace) {
@@ -653,7 +860,7 @@ function replaceSelectedText(enhancedText) {
       range.deleteContents();
       range.insertNode(document.createTextNode(enhancedText));
       selection.removeAllRanges();
-      return;
+      return true;
     } catch (e) {
       // fall through to clipboard
     }
@@ -661,6 +868,7 @@ function replaceSelectedText(enhancedText) {
 
   navigator.clipboard?.writeText(enhancedText);
   showToast('This area is not editable — enhanced text copied to clipboard.', 'info', { duration: 4000 });
+  return false;
 }
 
 function preserveLineBreaks(original, enhanced) {
@@ -691,7 +899,7 @@ function performUndo() {
   savedSelectionEnd = state.end;
   savedRange = state.range?.cloneRange?.() || null;
 
-  if (state.element && (state.element.tagName === 'TEXTAREA' || state.element.tagName === 'INPUT')) {
+  if (state.element && isTextInputElement(state.element)) {
     const el = state.element;
     if (!document.body.contains(el)) {
       showToast('Cannot undo — original field is no longer on the page.', 'warning');
@@ -703,9 +911,10 @@ function performUndo() {
     el.setSelectionRange(start, end);
     if (!document.execCommand('insertText', false, state.originalText)) {
       const val = el.value;
-      el.value = val.substring(0, start) + state.originalText + val.substring(end);
+      setNativeInputValue(el, val.substring(0, start) + state.originalText + val.substring(end));
+    } else {
+      setNativeInputValue(el, el.value);
     }
-    el.dispatchEvent(new Event('input', { bubbles: true }));
     showToast('Undone!', 'success');
     return;
   }
@@ -746,7 +955,8 @@ function friendlyError(msg) {
 }
 
 function escapeHtml(str) {
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  if (str == null) return '';
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function dismissToast() {
@@ -914,4 +1124,9 @@ function getScrambleStyles() {
       }
     }
   `;
+}
+
+if (!SCRAMBLE_ALREADY_LOADED) {
+  browserAPI.runtime.onMessage.addListener(handleRuntimeMessage);
+  bindPageEventListeners();
 }

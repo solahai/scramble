@@ -35,6 +35,8 @@ document.addEventListener('DOMContentLoaded', async function() {
       }, resolve);
     });
 
+    if (!statusElement) return;
+
     const providerNames = {
       openai: 'OpenAI', anthropic: 'Anthropic', ollama: 'Ollama',
       lmstudio: 'LM Studio', groq: 'Groq', openrouter: 'OpenRouter',
@@ -87,7 +89,7 @@ document.addEventListener('DOMContentLoaded', async function() {
     `;
   }
 
-  optionsButton.addEventListener('click', function() {
+  optionsButton?.addEventListener('click', function() {
     try {
       if (browserAPI.runtime.openOptionsPage) {
         browserAPI.runtime.openOptionsPage();

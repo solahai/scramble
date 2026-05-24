@@ -59,7 +59,10 @@ async function updateContextMenu() {
   try {
     await browserAPI.contextMenus.removeAll();
     const config = await getConfig();
-    const customPrompts = config.customPrompts || [];
+    const defaultIds = new Set(DEFAULT_PROMPTS.map(p => p.id));
+    const customPrompts = (config.customPrompts || []).filter(
+      p => p?.id && p?.title && p?.prompt && !defaultIds.has(p.id)
+    );
     const allPrompts = [...DEFAULT_PROMPTS, ...customPrompts];
 
     await browserAPI.contextMenus.create({
@@ -82,12 +85,29 @@ async function updateContextMenu() {
 }
 
 browserAPI.storage.onChanged.addListener((changes, area) => {
-  if (area === 'sync' && (changes.customPrompts || changes.systemInstruction)) {
+  if (area === 'sync' && changes.customPrompts) {
     updateContextMenu();
   }
 });
 
 // --- Content Script Injection ---
+
+async function ensureContentScript(tabId) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    try {
+      await browserAPI.tabs.sendMessage(tabId, { action: 'ping' });
+      return;
+    } catch {
+      if (attempt < 3) {
+        await new Promise(r => setTimeout(r, 150));
+        continue;
+      }
+    }
+  }
+
+  await injectContentScript(tabId);
+  await new Promise(r => setTimeout(r, 100));
+}
 
 async function injectContentScript(tabId) {
   try {
@@ -108,19 +128,14 @@ async function injectContentScript(tabId) {
 // --- Context Menu Click Handler ---
 
 browserAPI.contextMenus.onClicked.addListener((info, tab) => {
+  if (!tab?.id || !info.selectionText?.trim()) return;
+
   browserAPI.storage.sync.get('customPrompts', async ({ customPrompts = [] }) => {
     const allPrompts = [...DEFAULT_PROMPTS, ...customPrompts];
     if (allPrompts.some(prompt => prompt.id === info.menuItemId)) {
       try {
-        try {
-          await browserAPI.tabs.sendMessage(tab.id, { action: 'ping' });
-          await sendEnhanceTextMessage(tab.id, info.menuItemId, info.selectionText);
-        } catch {
-          await injectContentScript(tab.id);
-          // Small delay to let content script initialize
-          await new Promise(r => setTimeout(r, 100));
-          await sendEnhanceTextMessage(tab.id, info.menuItemId, info.selectionText);
-        }
+        await ensureContentScript(tab.id);
+        await sendEnhanceTextMessage(tab.id, info.menuItemId, info.selectionText);
       } catch (error) {
         console.error('Error handling context menu click:', error);
         notifyTab(tab.id, friendlyError(error.message), 'error');
@@ -228,45 +243,28 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
 if (browserAPI.commands) {
   browserAPI.commands.onCommand.addListener(async (command) => {
+    const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) return;
+
+    try {
+      await ensureContentScript(tab.id);
+    } catch (error) {
+      console.error('Failed to prepare content script for shortcut:', error);
+      return;
+    }
+
     if (command === 'fix-grammar') {
-      const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
-      if (tab) {
-        try {
-          await browserAPI.tabs.sendMessage(tab.id, { action: 'ping' });
-        } catch {
-          await injectContentScript(tab.id);
-          await new Promise(r => setTimeout(r, 100));
-        }
-        await browserAPI.tabs.sendMessage(tab.id, {
-          action: 'triggerFromShortcut',
-          promptId: 'fix_grammar'
-        });
-      }
+      await browserAPI.tabs.sendMessage(tab.id, {
+        action: 'triggerFromShortcut',
+        promptId: 'fix_grammar'
+      });
     } else if (command === 'improve-writing') {
-      const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
-      if (tab) {
-        try {
-          await browserAPI.tabs.sendMessage(tab.id, { action: 'ping' });
-        } catch {
-          await injectContentScript(tab.id);
-          await new Promise(r => setTimeout(r, 100));
-        }
-        await browserAPI.tabs.sendMessage(tab.id, {
-          action: 'triggerFromShortcut',
-          promptId: 'improve_writing'
-        });
-      }
+      await browserAPI.tabs.sendMessage(tab.id, {
+        action: 'triggerFromShortcut',
+        promptId: 'improve_writing'
+      });
     } else if (command === 'open-toolbar') {
-      const [tab] = await browserAPI.tabs.query({ active: true, currentWindow: true });
-      if (tab) {
-        try {
-          await browserAPI.tabs.sendMessage(tab.id, { action: 'ping' });
-        } catch {
-          await injectContentScript(tab.id);
-          await new Promise(r => setTimeout(r, 100));
-        }
-        await browserAPI.tabs.sendMessage(tab.id, { action: 'showToolbar' });
-      }
+      await browserAPI.tabs.sendMessage(tab.id, { action: 'showToolbar' });
     }
   });
 }
@@ -322,7 +320,21 @@ async function enhanceWithOpenAI(prompt, systemInstruction, config, signal = nul
     return await openaiChatCompletions(prompt, systemInstruction, config, model, customEndpoint, signal);
   }
 
-  return await openaiResponsesAPI(prompt, systemInstruction, config, model, signal);
+  try {
+    return await openaiResponsesAPI(prompt, systemInstruction, config, model, signal);
+  } catch (error) {
+    if (/404|not found|does not exist|unsupported|invalid.*model|responses/i.test(error.message)) {
+      return await openaiChatCompletions(
+        prompt,
+        systemInstruction,
+        config,
+        model,
+        'https://api.openai.com/v1/chat/completions',
+        signal
+      );
+    }
+    throw error;
+  }
 }
 
 async function openaiResponsesAPI(prompt, systemInstruction, config, model, signal = null) {
@@ -400,7 +412,11 @@ async function openaiChatCompletions(prompt, systemInstruction, config, model, e
   }
 
   const data = await response.json();
-  return data.choices[0].message.content.trim();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('Unexpected response format from OpenAI API.');
+  }
+  return content.trim();
 }
 
 async function enhanceWithAnthropic(prompt, systemInstruction, config, signal = null) {
@@ -435,7 +451,11 @@ async function enhanceWithAnthropic(prompt, systemInstruction, config, signal = 
   }
 
   const data = await response.json();
-  return data.content[0].text.trim();
+  const text = data.content?.[0]?.text;
+  if (!text) {
+    throw new Error('Unexpected response format from Anthropic API.');
+  }
+  return text.trim();
 }
 
 async function enhanceWithOllama(prompt, systemInstruction, config, signal = null) {
@@ -543,7 +563,11 @@ async function enhanceWithGroq(prompt, systemInstruction, config, signal = null)
   }
 
   const data = await response.json();
-  return data.choices[0].message.content.trim();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('Unexpected response format from Groq API.');
+  }
+  return content.trim();
 }
 
 async function enhanceWithOpenRouter(prompt, systemInstruction, config, signal = null) {
@@ -559,7 +583,7 @@ async function enhanceWithOpenRouter(prompt, systemInstruction, config, signal =
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${config.apiKey}`,
       'X-Title': 'Scramble Browser Extension',
-      'HTTP-Referer': 'https://github.com/nicholasgriffintn/scramble',
+      'HTTP-Referer': 'https://github.com/solahai/scramble',
     },
     body: JSON.stringify({
       model: config.llmModel || 'openai/gpt-4o-mini',
@@ -578,7 +602,11 @@ async function enhanceWithOpenRouter(prompt, systemInstruction, config, signal =
   }
 
   const data = await response.json();
-  return data.choices[0].message.content.trim();
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) {
+    throw new Error('Unexpected response format from OpenRouter API.');
+  }
+  return content.trim();
 }
 
 // --- Rate Limiter ---
@@ -605,7 +633,7 @@ const rateLimiter = (() => {
       if (requestCount < MAX_REQUESTS_PER_MINUTE) {
         const next = queue.shift();
         requestCount++;
-        next.resolve(next.fn());
+        Promise.resolve(next.fn()).then(next.resolve).catch(next.reject);
         if (queue.length > 0) {
           setTimeout(executeNext, RATE_LIMIT_RESET_INTERVAL / MAX_REQUESTS_PER_MINUTE);
         }

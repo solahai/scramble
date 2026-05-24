@@ -112,6 +112,11 @@ async function saveOptions() {
 
 // ========== Custom Prompts ==========
 
+const RESERVED_PROMPT_IDS = new Set([
+  'fix_grammar', 'improve_writing', 'make_professional', 'simplify', 'summarize',
+  'expand', 'bullet_points', 'make_friendly', 'make_concise', 'translate_english', 'scramble',
+]);
+
 function getCustomPrompts() {
   try {
     const promptContainers = document.querySelectorAll('.prompt-container');
@@ -121,8 +126,8 @@ function getCustomPrompts() {
       const prompt = container.querySelector('.prompt-text').value || '';
       const existingId = container.querySelector('.prompt-id')?.value;
       let id = existingId || snakeCase(title);
-      while (usedIds.has(id)) {
-        id = `${id}_${usedIds.size}`;
+      while (!id || usedIds.has(id) || RESERVED_PROMPT_IDS.has(id)) {
+        id = `${snakeCase(title) || 'custom'}_${usedIds.size + 1}`;
       }
       usedIds.add(id);
       return { id, title, prompt };
@@ -179,6 +184,7 @@ function addPromptToUI(title = '', prompt = '', id = '') {
     }
 
     promptsContainer.appendChild(promptElement);
+    markDirty();
   } catch (error) {
     console.error('Error adding prompt to UI:', error);
     showMessage('Error adding new prompt.', 'error');
@@ -517,10 +523,10 @@ async function testConnection() {
     }
 
     const response = await browserAPI.runtime.sendMessage({ action: 'testConnection', config });
-    if (response.success) {
+    if (response?.success) {
       showMessage(`${response.message} Sample: "${response.sample}…"`, 'success', 8000);
     } else {
-      showMessage(friendlySettingsError(response.error), 'error');
+      showMessage(friendlySettingsError(response?.error || 'Connection test failed.'), 'error');
     }
   } catch (error) {
     showMessage(friendlySettingsError(error.message), 'error');
@@ -587,6 +593,7 @@ document.addEventListener('DOMContentLoaded', () => {
     availableModelsSelect.addEventListener('change', (e) => {
       if (e.target.value) {
         document.getElementById('llmModel').value = e.target.value;
+        markDirty();
       }
     });
   }
@@ -607,6 +614,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const textarea = document.getElementById('systemInstruction');
       if (textarea) {
         textarea.value = DEFAULT_SYSTEM_INSTRUCTION;
+        markDirty();
         showMessage('System instruction reset to default.', 'info');
       }
     });
