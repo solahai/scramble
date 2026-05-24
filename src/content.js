@@ -2,16 +2,33 @@ const browserAPI = (typeof browser !== 'undefined' ? browser : chrome);
 
 // ========== State ==========
 let scrambleToolbar = null;
-let scrambleToast = null;
 let undoStack = [];
 let savedSelectedText = '';
 let savedRange = null;
 let savedActiveElement = null;
 let savedSelectionStart = null;
 let savedSelectionEnd = null;
+let selectionSnapshot = null;
 const MAX_UNDO = 10;
 let isProcessing = false;
 let autoHideTimeout = null;
+let currentRequestId = null;
+let toolbarPinned = false;
+
+const PROMPT_ICONS = {
+  fix_grammar: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 6L9 17l-5-5"/></svg>',
+  improve_writing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>',
+  make_professional: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>',
+  simplify: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="21" y1="10" x2="7" y2="10"/><line x1="21" y1="6" x2="3" y2="6"/><line x1="21" y1="14" x2="3" y2="14"/><line x1="21" y1="18" x2="7" y2="18"/></svg>',
+  summarize: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>',
+  expand: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>',
+  bullet_points: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="9" y1="6" x2="20" y2="6"/><line x1="9" y1="12" x2="20" y2="12"/><line x1="9" y1="18" x2="20" y2="18"/><circle cx="4" cy="6" r="1"/><circle cx="4" cy="12" r="1"/><circle cx="4" cy="18" r="1"/></svg>',
+  make_friendly: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>',
+  make_concise: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><line x1="20" y1="4" x2="8.12" y2="15.88"/><line x1="14.47" y1="14.48" x2="20" y2="20"/><line x1="8.12" y1="8.12" x2="12" y2="12"/></svg>',
+  translate_english: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+};
+
+const DEFAULT_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>';
 
 // ========== Message Listener ==========
 browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
@@ -20,11 +37,25 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
     return;
   }
 
+  if (request.action === 'showToast') {
+    showToast(request.message, request.type || 'info');
+    sendResponse({ success: true });
+    return;
+  }
+
+  if (request.action === 'queueStatus') {
+    showToast(`Queued… position ${request.position} in line`, 'info', { persist: false, duration: 2000 });
+    sendResponse({ success: true });
+    return;
+  }
+
   if (request.action === 'enhanceText') {
+    captureSelectionState(request.selectedText);
     handleEnhanceText(request.promptId, request.selectedText)
       .then(() => sendResponse({ success: true }))
       .catch(error => {
-        showToast(error.message, 'error');
+        dismissToast();
+        showToast(friendlyError(error.message), 'error');
         sendResponse({ success: false, error: error.message });
       });
     return true;
@@ -34,10 +65,12 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const selection = window.getSelection();
     const selectedText = selection?.toString()?.trim();
     if (selectedText) {
+      captureSelectionState(selectedText);
       handleEnhanceText(request.promptId, selectedText)
         .then(() => sendResponse({ success: true }))
         .catch(error => {
-          showToast(error.message, 'error');
+          dismissToast();
+          showToast(friendlyError(error.message), 'error');
           sendResponse({ success: false, error: error.message });
         });
     } else {
@@ -52,8 +85,7 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
     const selectedText = selection?.toString()?.trim();
     if (selectedText && selection.rangeCount > 0) {
       const range = selection.getRangeAt(0);
-      const rect = range.getBoundingClientRect();
-      showFloatingToolbar(rect);
+      showFloatingToolbar(range.getBoundingClientRect(), true);
     } else {
       showToast('Select some text to use Scramble.', 'info');
     }
@@ -62,20 +94,127 @@ browserAPI.runtime.onMessage.addListener((request, sender, sendResponse) => {
   }
 });
 
+// ========== Selection Capture ==========
+
+function captureSelectionState(fallbackText) {
+  const selection = window.getSelection();
+  const active = document.activeElement;
+
+  savedSelectedText = (fallbackText || selection?.toString() || '').trim();
+
+  savedRange = null;
+  savedActiveElement = null;
+  savedSelectionStart = null;
+  savedSelectionEnd = null;
+  selectionSnapshot = { type: 'none', originalText: savedSelectedText };
+
+  const isTextInput = active && (
+    active.tagName === 'TEXTAREA' ||
+    (active.tagName === 'INPUT' && ['text', 'search', 'email', 'url', 'tel', 'password'].includes(active.type))
+  );
+
+  if (isTextInput) {
+    savedActiveElement = active;
+    let start = active.selectionStart;
+    let end = active.selectionEnd;
+
+    if ((start === end || start == null) && savedSelectedText) {
+      const idx = active.value.indexOf(savedSelectedText);
+      if (idx >= 0) {
+        start = idx;
+        end = idx + savedSelectedText.length;
+      }
+    }
+
+    savedSelectionStart = start;
+    savedSelectionEnd = end;
+    selectionSnapshot = {
+      type: 'input',
+      element: active,
+      start,
+      end,
+      originalText: savedSelectedText,
+      fullValue: active.value,
+    };
+    return;
+  }
+
+  if (active && active.isContentEditable) {
+    savedActiveElement = active;
+    if (selection && selection.rangeCount > 0 && selection.toString().trim()) {
+      savedRange = selection.getRangeAt(0).cloneRange();
+    } else if (savedSelectedText) {
+      savedRange = findRangeForText(active, savedSelectedText);
+    }
+    selectionSnapshot = {
+      type: 'contenteditable',
+      element: active,
+      range: savedRange ? savedRange.cloneRange() : null,
+      originalText: savedSelectedText,
+    };
+    return;
+  }
+
+  if (selection && selection.rangeCount > 0 && savedSelectedText) {
+    try {
+      savedRange = selection.getRangeAt(0).cloneRange();
+      selectionSnapshot = {
+        type: 'range',
+        range: savedRange.cloneRange(),
+        originalText: savedSelectedText,
+      };
+    } catch (e) {
+      selectionSnapshot = { type: 'clipboard', originalText: savedSelectedText };
+    }
+    return;
+  }
+
+  if (savedSelectedText) {
+    selectionSnapshot = {
+      type: 'clipboard',
+      originalText: savedSelectedText,
+      editable: isEditableContext(selection?.anchorNode),
+    };
+  }
+}
+
+function findRangeForText(root, text) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let node;
+  while ((node = walker.nextNode())) {
+    const idx = node.textContent.indexOf(text);
+    if (idx >= 0) {
+      const range = document.createRange();
+      range.setStart(node, idx);
+      range.setEnd(node, idx + text.length);
+      return range;
+    }
+  }
+  return null;
+}
+
+function restoreSelectionSnapshot(snapshot) {
+  if (!snapshot) return;
+  savedActiveElement = snapshot.element || null;
+  savedSelectionStart = snapshot.start ?? null;
+  savedSelectionEnd = snapshot.end ?? null;
+  savedSelectedText = snapshot.originalText || '';
+  savedRange = snapshot.range ? snapshot.range.cloneRange() : null;
+  selectionSnapshot = { ...snapshot, range: savedRange };
+}
+
 // ========== Editable Field Detection ==========
 
 function isEditableContext(node) {
   if (!node) return false;
-  // Check if the node or its ancestor is editable
   const el = node.nodeType === Node.TEXT_NODE ? node.parentElement : node;
   if (!el) return false;
   if (el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && el.type === 'text')) return true;
   if (el.isContentEditable) return true;
-  // Walk up to find contentEditable parent
   let parent = el.parentElement;
   while (parent) {
     if (parent.isContentEditable) return true;
-    if (parent.tagName === 'TEXTAREA' || (parent.tagName === 'INPUT')) return true;
+    if (parent.tagName === 'TEXTAREA' || parent.tagName === 'INPUT') return true;
     parent = parent.parentElement;
   }
   return false;
@@ -83,146 +222,120 @@ function isEditableContext(node) {
 
 // ========== Floating Toolbar ==========
 
-function createFloatingToolbar() {
-  if (scrambleToolbar) {
-    scrambleToolbar.remove();
-  }
-
-  const toolbar = document.createElement('div');
-  toolbar.id = 'scramble-toolbar';
-  toolbar.innerHTML = `
-    <div id="scramble-toolbar-inner">
-      <div id="scramble-toolbar-actions"></div>
-    </div>
-  `;
-
-  // Inject styles
+function ensureStyles() {
   if (!document.getElementById('scramble-styles')) {
     const style = document.createElement('style');
     style.id = 'scramble-styles';
     style.textContent = getScrambleStyles();
     document.head.appendChild(style);
   }
+}
+
+function createFloatingToolbar(readOnlyHint = false) {
+  if (scrambleToolbar) scrambleToolbar.remove();
+
+  ensureStyles();
+  const toolbar = document.createElement('div');
+  toolbar.id = 'scramble-toolbar';
+  toolbar.setAttribute('role', 'toolbar');
+  toolbar.setAttribute('aria-label', 'Scramble writing actions');
+  toolbar.innerHTML = `
+    <div id="scramble-toolbar-inner">
+      ${readOnlyHint ? '<div id="scramble-toolbar-hint" role="note">Read-only area — preview before applying</div>' : ''}
+      <div id="scramble-toolbar-actions"></div>
+    </div>
+  `;
 
   document.body.appendChild(toolbar);
   scrambleToolbar = toolbar;
-
-  // Load prompts and create buttons
   loadToolbarActions();
-
   return toolbar;
 }
 
 async function loadToolbarActions() {
   try {
     const response = await browserAPI.runtime.sendMessage({ action: 'getPrompts' });
-    if (response.success) {
-      const actionsContainer = document.getElementById('scramble-toolbar-actions');
-      if (!actionsContainer) return;
-      actionsContainer.innerHTML = '';
+    if (!response.success) return;
 
-      const icons = {
-        fix_grammar: '✓',
-        improve_writing: '✨',
-        make_professional: '💼',
-        simplify: '📝',
-        summarize: '📋',
-        expand: '📖',
-        bullet_points: '•',
-        make_friendly: '😊',
-        make_concise: '✂️',
-        translate_english: '🌐',
-      };
+    const actionsContainer = document.getElementById('scramble-toolbar-actions');
+    if (!actionsContainer) return;
+    actionsContainer.innerHTML = '';
 
-      response.prompts.forEach(prompt => {
-        const btn = document.createElement('button');
-        btn.className = 'scramble-action-btn';
-        btn.dataset.promptId = prompt.id;
-        const icon = icons[prompt.id] || '⚡';
-        btn.innerHTML = `<span class="scramble-action-icon">${icon}</span><span>${prompt.title}</span>`;
-        btn.addEventListener('click', () => {
-          const selection = window.getSelection();
-          const selectedText = selection?.toString()?.trim() || savedSelectedText;
-          if (selectedText) {
-            handleEnhanceText(prompt.id, selectedText);
-          } else {
-            showToast('Please select some text first.', 'warning');
-          }
-        });
-        actionsContainer.appendChild(btn);
+    response.prompts.forEach(prompt => {
+      const btn = document.createElement('button');
+      btn.className = 'scramble-action-btn';
+      btn.type = 'button';
+      btn.dataset.promptId = prompt.id;
+      btn.setAttribute('aria-label', prompt.title);
+      btn.title = prompt.title;
+      const icon = PROMPT_ICONS[prompt.id] || DEFAULT_ICON;
+      btn.innerHTML = `<span class="scramble-action-icon">${icon}</span><span class="scramble-action-label">${escapeHtml(prompt.title)}</span>`;
+      btn.addEventListener('mousedown', (e) => e.preventDefault());
+      btn.addEventListener('click', () => {
+        const text = savedSelectedText || window.getSelection()?.toString()?.trim();
+        if (text) {
+          if (!selectionSnapshot) captureSelectionState(text);
+          handleEnhanceText(prompt.id, text);
+        } else {
+          showToast('Please select some text first.', 'warning');
+        }
       });
+      actionsContainer.appendChild(btn);
+    });
 
-      // Add undo button at the end if there's undo history
-      if (undoStack.length > 0) {
-        const undoBtn = document.createElement('button');
-        undoBtn.id = 'scramble-undo-btn';
-        undoBtn.className = 'scramble-action-btn scramble-undo';
-        undoBtn.innerHTML = `<span class="scramble-action-icon">↩</span><span>Undo</span>`;
-        undoBtn.addEventListener('click', () => performUndo());
-        actionsContainer.appendChild(undoBtn);
-      }
+    if (undoStack.length > 0) {
+      const undoBtn = document.createElement('button');
+      undoBtn.id = 'scramble-undo-btn';
+      undoBtn.type = 'button';
+      undoBtn.className = 'scramble-action-btn scramble-undo';
+      undoBtn.setAttribute('aria-label', 'Undo last change');
+      undoBtn.innerHTML = `<span class="scramble-action-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg></span><span class="scramble-action-label">Undo</span>`;
+      undoBtn.addEventListener('click', () => performUndo());
+      actionsContainer.appendChild(undoBtn);
     }
   } catch (error) {
     console.error('[Scramble] Error loading toolbar actions:', error);
   }
 }
 
-function showFloatingToolbar(rect) {
-  // Save the full selection state before creating toolbar (clicking toolbar will deselect)
+function showFloatingToolbar(rect, forceShow = false) {
+  captureSelectionState();
+
   const selection = window.getSelection();
-  savedSelectedText = selection?.toString()?.trim() || '';
-  
-  // Save the range for contentEditable and regular page text
-  if (selection && selection.rangeCount > 0) {
-    savedRange = selection.getRangeAt(0).cloneRange();
-  }
-  
-  // Save active element state for input/textarea
-  const active = document.activeElement;
-  if (active && (active.tagName === 'TEXTAREA' || (active.tagName === 'INPUT' && active.type === 'text'))) {
-    savedActiveElement = active;
-    savedSelectionStart = active.selectionStart;
-    savedSelectionEnd = active.selectionEnd;
-  } else if (active && active.isContentEditable) {
-    savedActiveElement = active;
-  } else {
-    savedActiveElement = null;
-    savedSelectionStart = null;
-    savedSelectionEnd = null;
+  const editable = isEditableContext(selection?.anchorNode);
+  if (!editable && !forceShow) {
+    hideFloatingToolbar();
+    return;
   }
 
-  const toolbar = createFloatingToolbar();
-
-  // Position toolbar near the selection
+  const toolbar = createFloatingToolbar(!editable);
+  const toolbarWidth = 300;
   const top = rect.bottom + window.scrollY + 6;
-  const left = Math.max(8, Math.min(rect.left + window.scrollX, window.innerWidth - 220));
+  const left = Math.max(8, Math.min(rect.left + window.scrollX, window.innerWidth - toolbarWidth - 8));
 
   toolbar.style.top = `${top}px`;
   toolbar.style.left = `${left}px`;
   toolbar.classList.add('scramble-visible');
-
-  // Schedule auto-hide after 6 seconds of inactivity (unless processing)
   scheduleAutoHide();
 }
 
 function scheduleAutoHide() {
   clearTimeout(autoHideTimeout);
-  if (isProcessing) return;
+  if (isProcessing || toolbarPinned) return;
   autoHideTimeout = setTimeout(() => {
-    // Only auto-hide if no text is currently selected
     const selection = window.getSelection();
-    const selectedText = selection?.toString()?.trim();
-    if (!selectedText) {
+    if (!selection?.toString()?.trim()) {
       hideFloatingToolbar();
     } else {
-      // Text still selected, reschedule
       scheduleAutoHide();
     }
-  }, 5000);
+  }, 15000);
 }
 
 function hideFloatingToolbar() {
+  if (isProcessing) return;
   clearTimeout(autoHideTimeout);
+  toolbarPinned = false;
   if (scrambleToolbar) {
     scrambleToolbar.classList.remove('scramble-visible');
     setTimeout(() => {
@@ -232,12 +345,9 @@ function hideFloatingToolbar() {
   }
 }
 
-// ========== Text Selection Listener ==========
-
 let selectionTimeout = null;
 document.addEventListener('mouseup', (e) => {
-  // Ignore clicks on our toolbar
-  if (e.target.closest('#scramble-toolbar')) return;
+  if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) return;
 
   clearTimeout(selectionTimeout);
   selectionTimeout = setTimeout(() => {
@@ -245,41 +355,47 @@ document.addEventListener('mouseup', (e) => {
     const selectedText = selection?.toString()?.trim();
 
     if (selectedText && selectedText.length > 2) {
-      // Only auto-show toolbar when selecting inside editable areas
       const anchorNode = selection.anchorNode;
       if (isEditableContext(anchorNode)) {
-        const range = selection.getRangeAt(0);
-        const rect = range.getBoundingClientRect();
-        showFloatingToolbar(rect);
+        showFloatingToolbar(selection.getRangeAt(0).getBoundingClientRect());
       } else {
-        // For non-editable content, hide toolbar (use context menu or keyboard shortcut instead)
-        hideFloatingToolbar();
+        showFloatingToolbar(selection.getRangeAt(0).getBoundingClientRect(), true);
       }
-    } else {
+    } else if (!isProcessing) {
       hideFloatingToolbar();
     }
   }, 400);
 });
 
-// Hide toolbar on click outside
 document.addEventListener('mousedown', (e) => {
-  if (scrambleToolbar && !e.target.closest('#scramble-toolbar')) {
+  if (e.target.closest('#scramble-toolbar, #scramble-preview-overlay')) {
+    toolbarPinned = true;
+    return;
+  }
+  if (scrambleToolbar && !isProcessing) {
     hideFloatingToolbar();
   }
 });
 
-// Hide on escape or when selection changes
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    hideFloatingToolbar();
+    if (document.getElementById('scramble-preview-overlay')) {
+      closePreviewModal(false);
+    } else if (isProcessing && currentRequestId) {
+      browserAPI.runtime.sendMessage({ action: 'cancelEnhancement', requestId: currentRequestId }).catch(() => {});
+      isProcessing = false;
+      currentRequestId = null;
+      dismissToast();
+      showToast('Cancelled.', 'info');
+    } else {
+      hideFloatingToolbar();
+    }
   }
 });
 
-// Hide when window loses focus
 window.addEventListener('blur', () => {
-  // Small delay to allow toolbar clicks to register
   setTimeout(() => {
-    if (!document.hasFocus()) {
+    if (!document.hasFocus() && !isProcessing && !document.getElementById('scramble-preview-overlay')) {
       hideFloatingToolbar();
     }
   }, 200);
@@ -288,71 +404,168 @@ window.addEventListener('blur', () => {
 // ========== Text Enhancement ==========
 
 async function handleEnhanceText(promptId, selectedText) {
+  if (!selectionSnapshot) captureSelectionState(selectedText);
+
+  const snapshotForRestore = {
+    type: selectionSnapshot?.type,
+    element: selectionSnapshot?.element || savedActiveElement,
+    start: savedSelectionStart,
+    end: savedSelectionEnd,
+    range: savedRange?.cloneRange?.() || selectionSnapshot?.range?.cloneRange?.() || null,
+    originalText: selectedText,
+    fullValue: selectionSnapshot?.fullValue,
+  };
+
   isProcessing = true;
+  toolbarPinned = true;
   clearTimeout(autoHideTimeout);
-  showToast('Enhancing...', 'loading');
+  currentRequestId = `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+
+  showLoadingToast('Enhancing…', () => {
+    browserAPI.runtime.sendMessage({ action: 'cancelEnhancement', requestId: currentRequestId }).catch(() => {});
+    isProcessing = false;
+    currentRequestId = null;
+    dismissToast();
+    showToast('Cancelled.', 'info');
+  });
 
   try {
+    const configResp = await browserAPI.runtime.sendMessage({ action: 'getConfig' });
+    const showPreview = configResp.success ? configResp.config.showPreview !== false : true;
+
     const response = await browserAPI.runtime.sendMessage({
       action: 'enhanceText',
-      promptId: promptId,
-      selectedText: selectedText,
+      promptId,
+      selectedText,
+      requestId: currentRequestId,
     });
 
-    if (response.success) {
-      // Save undo state
-      saveUndoState(selectedText);
+    dismissToast();
 
-      // Replace text
-      replaceSelectedText(response.enhancedText);
-
-      showToast('Done!', 'success');
-      hideFloatingToolbar();
-    } else {
-      throw new Error(response.error || 'Unknown error occurred');
+    if (!response?.success) {
+      throw new Error(response?.error || 'Unknown error occurred');
     }
+
+    if (showPreview) {
+      const accepted = await showPreviewModal(selectedText, response.enhancedText);
+      if (!accepted) {
+        showToast('Changes discarded.', 'info');
+        return;
+      }
+    }
+
+    restoreSelectionSnapshot(snapshotForRestore);
+
+    const applySnapshot = buildApplySnapshot(selectedText, response.enhancedText);
+    replaceSelectedText(response.enhancedText);
+    applySnapshot.end = applySnapshot.start + response.enhancedText.length;
+    saveUndoState(applySnapshot);
+    showToast('Done!', 'success');
+    hideFloatingToolbar();
   } catch (error) {
-    console.error('[Scramble] Error:', error);
-    showToast(error.message || 'Failed to enhance text', 'error');
+    dismissToast();
+    if (error.message !== 'Cancelled') {
+      showToast(friendlyError(error.message), 'error');
+    }
     throw error;
   } finally {
     isProcessing = false;
+    currentRequestId = null;
+    toolbarPinned = false;
   }
+}
+
+function buildApplySnapshot(originalText, enhancedText) {
+  return {
+    originalText,
+    enhancedText,
+    element: savedActiveElement,
+    start: savedSelectionStart,
+    end: savedSelectionEnd,
+    range: savedRange?.cloneRange?.() || null,
+    selectedText: savedSelectedText,
+    type: selectionSnapshot?.type || 'none',
+    fullValue: selectionSnapshot?.fullValue,
+  };
+}
+
+// ========== Preview Modal ==========
+
+function showPreviewModal(original, enhanced) {
+  ensureStyles();
+  return new Promise((resolve) => {
+    const overlay = document.createElement('div');
+    overlay.id = 'scramble-preview-overlay';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-label', 'Review AI changes');
+    overlay.innerHTML = `
+      <div class="scramble-preview-modal">
+        <div class="scramble-preview-header">
+          <h3>Review changes</h3>
+          <p>Compare the original and enhanced text before applying.</p>
+        </div>
+        <div class="scramble-preview-panels">
+          <div class="scramble-preview-panel">
+            <span class="scramble-preview-label">Original</span>
+            <div class="scramble-preview-text" id="scramble-preview-original"></div>
+          </div>
+          <div class="scramble-preview-panel scramble-preview-panel-enhanced">
+            <span class="scramble-preview-label">Enhanced</span>
+            <div class="scramble-preview-text" id="scramble-preview-enhanced"></div>
+          </div>
+        </div>
+        <div class="scramble-preview-actions">
+          <button type="button" class="scramble-preview-btn scramble-preview-reject" id="scramble-preview-reject">Reject</button>
+          <button type="button" class="scramble-preview-btn scramble-preview-accept" id="scramble-preview-accept">Apply changes</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+    overlay.querySelector('#scramble-preview-original').textContent = original;
+    overlay.querySelector('#scramble-preview-enhanced').textContent = enhanced;
+
+    const cleanup = (accepted) => {
+      overlay.remove();
+      resolve(accepted);
+    };
+
+    overlay.querySelector('#scramble-preview-accept').addEventListener('click', () => cleanup(true));
+    overlay.querySelector('#scramble-preview-reject').addEventListener('click', () => cleanup(false));
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) cleanup(false);
+    });
+  });
+}
+
+function closePreviewModal(accepted) {
+  document.getElementById('scramble-preview-overlay')?.remove();
 }
 
 // ========== Text Replacement ==========
 
 function replaceSelectedText(enhancedText) {
-  // Use saved state since clicking toolbar deselects text
   const activeElement = savedActiveElement || document.activeElement;
+  const canReplaceInPlace = selectionSnapshot?.type !== 'clipboard' || selectionSnapshot?.editable;
 
-  // Handle input/textarea - preserve line breaks in the value
   if (activeElement && (activeElement.tagName === 'TEXTAREA' || (activeElement.tagName === 'INPUT' && activeElement.type === 'text'))) {
     const start = savedSelectionStart ?? activeElement.selectionStart;
     const end = savedSelectionEnd ?? activeElement.selectionEnd;
     const text = activeElement.value;
-    
-    // Preserve the original paragraph structure: detect line break pattern
     const originalSelection = text.substring(start, end);
     const preservedText = preserveLineBreaks(originalSelection, enhancedText);
-    
-    activeElement.focus();
 
-    // Use execCommand for better undo support, fallback to direct assignment
+    activeElement.focus();
     activeElement.setSelectionRange(start, end);
     if (!document.execCommand('insertText', false, preservedText)) {
       activeElement.value = text.substring(0, start) + preservedText + text.substring(end);
     }
 
-    // Set cursor after inserted text
     const newPos = start + preservedText.length;
     activeElement.setSelectionRange(newPos, newPos);
-
-    // Trigger events for reactive frameworks
     activeElement.dispatchEvent(new Event('input', { bubbles: true }));
     activeElement.dispatchEvent(new Event('change', { bubbles: true }));
 
-    // React-specific
     const nativeInputValueSetter = Object.getOwnPropertyDescriptor(
       window.HTMLTextAreaElement?.prototype || window.HTMLInputElement.prototype,
       'value'
@@ -361,57 +574,41 @@ function replaceSelectedText(enhancedText) {
       nativeInputValueSetter.call(activeElement, activeElement.value);
       activeElement.dispatchEvent(new Event('input', { bubbles: true }));
     }
+    return;
   }
-  // Handle contentEditable - preserve existing DOM structure (paragraphs, divs, etc.)
-  else if (activeElement && activeElement.isContentEditable && savedRange) {
+
+  if (activeElement && activeElement.isContentEditable && savedRange) {
     activeElement.focus();
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(savedRange);
-    
+
     const range = selection.getRangeAt(0);
-    
-    // Capture the HTML structure of the selected content to preserve paragraph formatting
     const selectedFragment = range.cloneContents();
     const tempDiv = document.createElement('div');
     tempDiv.appendChild(selectedFragment);
     const originalHTML = tempDiv.innerHTML;
-    
-    // Check if the selection spans block elements (p, div, li, etc.)
     const hasBlockElements = /<(p|div|li|h[1-6]|blockquote)\b/i.test(originalHTML);
-    
+
     range.deleteContents();
-    
+
     if (hasBlockElements) {
-      // The original had paragraph/block structure - preserve it
-      // Split the enhanced text by newlines and map to the same block structure
       const enhancedLines = enhancedText.split(/\n+/).filter(l => l.trim());
-      
-      // Detect what block tag was used (p, div, etc.)
       const blockMatch = originalHTML.match(/<(p|div|li|h[1-6]|blockquote)\b/i);
       const blockTag = blockMatch ? blockMatch[1].toLowerCase() : 'p';
-      
-      // Get the attributes from the first block element for style consistency
       const attrMatch = originalHTML.match(new RegExp(`<${blockTag}([^>]*)>`, 'i'));
       const attrs = attrMatch ? attrMatch[1] : '';
-      
       const fragment = document.createDocumentFragment();
-      
-      // If single paragraph, just insert text content
+
       if (enhancedLines.length <= 1) {
-        const textNode = document.createTextNode(enhancedText.trim());
-        fragment.appendChild(textNode);
+        fragment.appendChild(document.createTextNode(enhancedText.trim()));
       } else {
-        // Multiple paragraphs - recreate blocks
         enhancedLines.forEach((line, i) => {
           if (i === 0) {
-            // First line: insert as text node (goes into the existing first block)
             fragment.appendChild(document.createTextNode(line.trim()));
           } else {
-            // Subsequent lines: create new block elements
             const block = document.createElement(blockTag);
             if (attrs) {
-              // Copy attributes from original
               const tempEl = document.createElement('div');
               tempEl.innerHTML = `<${blockTag}${attrs}></${blockTag}>`;
               const src = tempEl.firstChild;
@@ -424,348 +621,296 @@ function replaceSelectedText(enhancedText) {
           }
         });
       }
-      
       range.insertNode(fragment);
     } else {
-      // No block structure - simple text replacement, preserve <br> pattern
       const hasBRs = /<br\s*\/?>/i.test(originalHTML);
-      
       if (hasBRs && enhancedText.includes('\n')) {
         const lines = enhancedText.split('\n');
         const fragment = document.createDocumentFragment();
         lines.forEach((line, i) => {
           fragment.appendChild(document.createTextNode(line));
-          if (i < lines.length - 1) {
-            fragment.appendChild(document.createElement('br'));
-          }
+          if (i < lines.length - 1) fragment.appendChild(document.createElement('br'));
         });
         range.insertNode(fragment);
       } else {
-        // Plain text, no line breaks to worry about
         range.insertNode(document.createTextNode(enhancedText));
       }
     }
 
-    // Move cursor to end
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
-
-    // Trigger input event
     activeElement.dispatchEvent(new Event('input', { bubbles: true }));
+    return;
   }
-  // Handle regular selection on page (non-editable text)
-  else if (savedRange) {
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(savedRange);
-    
-    const range = selection.getRangeAt(0);
-    range.deleteContents();
-    range.insertNode(document.createTextNode(enhancedText));
-    selection.removeAllRanges();
+
+  if (savedRange && canReplaceInPlace) {
+    try {
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(savedRange);
+      const range = selection.getRangeAt(0);
+      range.deleteContents();
+      range.insertNode(document.createTextNode(enhancedText));
+      selection.removeAllRanges();
+      return;
+    } catch (e) {
+      // fall through to clipboard
+    }
   }
-  // Fallback: copy to clipboard
-  else {
-    navigator.clipboard?.writeText(enhancedText);
-    showToast('Enhanced text copied to clipboard.', 'info');
-  }
+
+  navigator.clipboard?.writeText(enhancedText);
+  showToast('This area is not editable — enhanced text copied to clipboard.', 'info', { duration: 4000 });
 }
 
-// Preserve the line-break/paragraph structure of the original text
 function preserveLineBreaks(original, enhanced) {
-  // Count double-newlines (paragraph breaks) vs single newlines in original
   const origParaBreaks = (original.match(/\n\s*\n/g) || []).length;
-  const origSingleBreaks = (original.match(/\n/g) || []).length;
   const enhancedParaBreaks = (enhanced.match(/\n\s*\n/g) || []).length;
-  
-  // If the original had paragraph breaks but the enhanced doesn't, 
-  // the AI likely flattened the paragraphs - try to restore structure
   if (origParaBreaks > 0 && enhancedParaBreaks === 0 && enhanced.includes('\n')) {
-    // The enhanced text has single newlines where there should be double newlines
-    // This happens when AI strips paragraph spacing
     return enhanced;
   }
-  
-  // If original had no newlines but enhanced added them, or vice versa,
-  // respect the enhanced text as-is (the AI intentionally changed structure)
   return enhanced;
 }
 
 // ========== Undo System ==========
 
-function saveUndoState(originalText) {
-  undoStack.push({
-    text: originalText,
-    timestamp: Date.now(),
-    element: document.activeElement,
-    selectionStart: document.activeElement?.selectionStart,
-    selectionEnd: document.activeElement?.selectionEnd,
-  });
-
-  if (undoStack.length > MAX_UNDO) {
-    undoStack.shift();
-  }
-
-  updateUndoButton();
+function saveUndoState(applySnapshot) {
+  undoStack.push({ ...applySnapshot, timestamp: Date.now() });
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
 }
 
 function performUndo() {
-  if (undoStack.length === 0) return;
-
-  const lastState = undoStack.pop();
-
-  // Try to replace the enhanced text with original
-  if (lastState.element && (lastState.element.tagName === 'TEXTAREA' || lastState.element.tagName === 'INPUT')) {
-    // For inputs, we'd need the full text state - simplified version
-    showToast('Undo: previous text copied to clipboard', 'info');
-    navigator.clipboard?.writeText(lastState.text);
-  } else {
-    showToast('Undo: previous text copied to clipboard', 'info');
-    navigator.clipboard?.writeText(lastState.text);
+  if (undoStack.length === 0) {
+    showToast('Nothing to undo.', 'info');
+    return;
   }
 
-  updateUndoButton();
-}
+  const state = undoStack.pop();
+  savedActiveElement = state.element;
+  savedSelectionStart = state.start;
+  savedSelectionEnd = state.end;
+  savedRange = state.range?.cloneRange?.() || null;
 
-function updateUndoButton() {
-  // Undo button is now part of the action list, no separate update needed
-}
-
-// ========== Toast Notifications ==========
-
-function showToast(message, type = 'info') {
-  // Remove existing toast
-  const existing = document.getElementById('scramble-toast');
-  if (existing) existing.remove();
-
-  // Inject styles if needed
-  if (!document.getElementById('scramble-styles')) {
-    const style = document.createElement('style');
-    style.id = 'scramble-styles';
-    style.textContent = getScrambleStyles();
-    document.head.appendChild(style);
+  if (state.element && (state.element.tagName === 'TEXTAREA' || state.element.tagName === 'INPUT')) {
+    const el = state.element;
+    if (!document.body.contains(el)) {
+      showToast('Cannot undo — original field is no longer on the page.', 'warning');
+      return;
+    }
+    const start = state.start;
+    const end = state.end ?? (start + (state.enhancedText?.length || 0));
+    el.focus();
+    el.setSelectionRange(start, end);
+    if (!document.execCommand('insertText', false, state.originalText)) {
+      const val = el.value;
+      el.value = val.substring(0, start) + state.originalText + val.substring(end);
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+    showToast('Undone!', 'success');
+    return;
   }
+
+  if (state.element?.isContentEditable && state.range) {
+    if (!document.body.contains(state.element)) {
+      showToast('Cannot undo — original field is no longer on the page.', 'warning');
+      return;
+    }
+    state.element.focus();
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    const range = state.range.cloneRange();
+    selection.addRange(range);
+    range.deleteContents();
+    range.insertNode(document.createTextNode(state.originalText));
+    state.element.dispatchEvent(new Event('input', { bubbles: true }));
+    showToast('Undone!', 'success');
+    return;
+  }
+
+  navigator.clipboard?.writeText(state.originalText);
+  showToast('Original text copied to clipboard.', 'info');
+}
+
+// ========== Toasts ==========
+
+function friendlyError(msg) {
+  if (!msg) return 'Something went wrong. Open Scramble Settings to check your configuration.';
+  if (/cancel/i.test(msg)) return msg;
+  if (/401|403|Incorrect API key|invalid.*key|authentication/i.test(msg)) {
+    return 'Invalid API key. Open Scramble Settings to update your key.';
+  }
+  if (/timed out|timeout/i.test(msg)) return 'Request timed out. Try again or check your connection.';
+  if (/429|rate limit/i.test(msg)) return 'Rate limit reached. Please wait a moment and try again.';
+  if (/not configured|not set/i.test(msg)) return `${msg} Open Scramble Settings to fix this.`;
+  return msg;
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+function dismissToast() {
+  document.getElementById('scramble-toast')?.remove();
+}
+
+function showLoadingToast(message, onCancel) {
+  dismissToast();
+  ensureStyles();
 
   const toast = document.createElement('div');
   toast.id = 'scramble-toast';
-  toast.className = `scramble-toast scramble-toast-${type}`;
-
-  const icons = {
-    success: '✓',
-    error: '✕',
-    warning: '⚠',
-    info: 'ℹ',
-    loading: '',
-  };
-
-  const iconHtml = type === 'loading'
-    ? '<div class="scramble-spinner"></div>'
-    : `<span class="scramble-toast-icon">${icons[type]}</span>`;
-
+  toast.className = 'scramble-toast scramble-toast-loading';
+  toast.setAttribute('role', 'status');
+  toast.setAttribute('aria-live', 'polite');
   toast.innerHTML = `
-    ${iconHtml}
-    <span class="scramble-toast-message">${message}</span>
+    <div class="scramble-spinner"></div>
+    <span class="scramble-toast-message">${escapeHtml(message)}</span>
+    <button type="button" class="scramble-toast-cancel" aria-label="Cancel">Cancel</button>
   `;
-
   document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('scramble-toast-visible'));
+  toast.querySelector('.scramble-toast-cancel')?.addEventListener('click', onCancel);
+}
 
-  // Animate in
-  requestAnimationFrame(() => {
-    toast.classList.add('scramble-toast-visible');
-  });
+function showToast(message, type = 'info', opts = {}) {
+  dismissToast();
+  ensureStyles();
 
-  // Auto dismiss (except loading)
-  if (type !== 'loading') {
+  const icons = { success: '✓', error: '✕', warning: '⚠', info: 'ℹ' };
+  const toast = document.createElement('div');
+  toast.id = 'scramble-toast';
+  toast.className = `scramble-toast scramble-toast-${type}`;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  toast.setAttribute('aria-live', type === 'error' ? 'assertive' : 'polite');
+  toast.innerHTML = `
+    <span class="scramble-toast-icon">${icons[type] || icons.info}</span>
+    <span class="scramble-toast-message">${escapeHtml(message)}</span>
+  `;
+  document.body.appendChild(toast);
+  requestAnimationFrame(() => toast.classList.add('scramble-toast-visible'));
+
+  const duration = opts.duration ?? (type === 'error' ? 5000 : 3000);
+  if (opts.persist !== true) {
     setTimeout(() => {
       toast.classList.remove('scramble-toast-visible');
       setTimeout(() => toast.remove(), 300);
-    }, type === 'error' ? 4000 : 2000);
+    }, duration);
   }
-
-  scrambleToast = toast;
 }
 
-// ========== Styles ==========
-
 function getScrambleStyles() {
-  return `
-    /* Scramble Floating Toolbar — Minimal */
+  const reducedMotion = '@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; } }';
+  return reducedMotion + `
     #scramble-toolbar {
       position: absolute;
-      z-index: 2147483647;
+      z-index: 2147483646;
       opacity: 0;
       transform: translateY(-2px) scale(0.98);
       transition: opacity 0.15s ease, transform 0.15s ease;
       pointer-events: none;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-      font-size: 12px;
-      line-height: 1.3;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      line-height: 1.35;
       color: #334155;
     }
-    #scramble-toolbar.scramble-visible {
-      opacity: 1;
-      transform: translateY(0) scale(1);
-      pointer-events: auto;
-    }
+    #scramble-toolbar.scramble-visible { opacity: 1; transform: none; pointer-events: auto; }
     #scramble-toolbar-inner {
-      background: #ffffff;
+      background: #fff;
       border: 1px solid rgba(0,0,0,0.08);
       border-radius: 10px;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.1), 0 0 1px rgba(0,0,0,0.1);
-      width: 200px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.12);
+      min-width: 280px;
+      max-width: 320px;
       overflow: hidden;
     }
-    #scramble-toolbar-actions {
-      max-height: 260px;
-      overflow-y: auto;
-      padding: 4px;
-    }
-    #scramble-toolbar-actions::-webkit-scrollbar {
-      width: 3px;
-    }
-    #scramble-toolbar-actions::-webkit-scrollbar-thumb {
-      background: #d1d5db;
-      border-radius: 3px;
-    }
-    .scramble-action-btn {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      width: 100%;
-      padding: 6px 8px;
-      border: none;
-      background: transparent;
-      color: #475569;
-      cursor: pointer;
-      border-radius: 6px;
-      font-size: 12px;
-      text-align: left;
-      transition: background 0.1s, color 0.1s;
-      font-family: inherit;
-      line-height: 1.3;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .scramble-action-btn:hover {
-      background: #f1f5f9;
-      color: #6366f1;
-    }
-    .scramble-action-btn:active {
-      background: #e2e8f0;
-    }
-    .scramble-action-btn.scramble-undo {
-      border-top: 1px solid #f1f5f9;
-      margin-top: 2px;
-      padding-top: 7px;
-      color: #94a3b8;
+    #scramble-toolbar-hint {
+      padding: 6px 10px;
       font-size: 11px;
+      color: #64748b;
+      background: #f8fafc;
+      border-bottom: 1px solid #e2e8f0;
     }
-    .scramble-action-btn.scramble-undo:hover {
-      color: #6366f1;
+    #scramble-toolbar-actions { max-height: 320px; overflow-y: auto; padding: 4px; }
+    .scramble-action-btn {
+      display: flex; align-items: center; gap: 8px; width: 100%;
+      padding: 8px 10px; border: none; background: transparent;
+      color: #475569; cursor: pointer; border-radius: 6px;
+      font-size: 13px; text-align: left; font-family: inherit;
     }
-    .scramble-action-icon {
-      font-size: 13px;
-      width: 18px;
-      text-align: center;
-      flex-shrink: 0;
-    }
-
-    /* Toast Notifications — Compact */
+    .scramble-action-btn:hover { background: #f1f5f9; color: #6366f1; }
+    .scramble-action-icon { width: 18px; height: 18px; flex-shrink: 0; display: flex; align-items: center; justify-content: center; }
+    .scramble-action-icon svg { width: 16px; height: 16px; }
+    .scramble-action-label { white-space: normal; word-break: break-word; line-height: 1.3; }
+    .scramble-action-btn.scramble-undo { border-top: 1px solid #f1f5f9; margin-top: 2px; color: #94a3b8; }
     .scramble-toast {
-      position: fixed;
-      bottom: 20px;
-      right: 20px;
-      z-index: 2147483647;
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 14px;
-      border-radius: 8px;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      font-size: 12px;
-      font-weight: 500;
-      box-shadow: 0 2px 12px rgba(0,0,0,0.12);
-      transform: translateY(20px);
-      opacity: 0;
+      position: fixed; bottom: 20px; left: 20px; z-index: 2147483647;
+      display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+      border-radius: 8px; font-family: inherit; font-size: 13px; font-weight: 500;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.15);
+      transform: translateY(12px); opacity: 0;
       transition: transform 0.2s ease, opacity 0.2s ease;
-      max-width: 280px;
+      max-width: min(360px, calc(100vw - 40px));
     }
-    .scramble-toast-visible {
-      transform: translateY(0);
-      opacity: 1;
-    }
-    .scramble-toast-success {
-      background: #ecfdf5;
-      color: #065f46;
-      border: 1px solid #a7f3d0;
-    }
-    .scramble-toast-error {
-      background: #fef2f2;
-      color: #991b1b;
-      border: 1px solid #fca5a5;
-    }
-    .scramble-toast-warning {
-      background: #fffbeb;
-      color: #92400e;
-      border: 1px solid #fcd34d;
-    }
-    .scramble-toast-info {
-      background: #eff6ff;
-      color: #1e40af;
-      border: 1px solid #93c5fd;
-    }
-    .scramble-toast-loading {
-      background: #fafafa;
-      color: #6366f1;
-      border: 1px solid #e2e8f0;
-    }
-    .scramble-toast-icon {
-      font-size: 13px;
-      flex-shrink: 0;
-    }
-    .scramble-toast-message {
-      line-height: 1.3;
+    .scramble-toast-visible { transform: none; opacity: 1; }
+    .scramble-toast-success { background: #ecfdf5; color: #065f46; border: 1px solid #a7f3d0; }
+    .scramble-toast-error { background: #fef2f2; color: #991b1b; border: 1px solid #fca5a5; }
+    .scramble-toast-warning { background: #fffbeb; color: #92400e; border: 1px solid #fcd34d; }
+    .scramble-toast-info { background: #eff6ff; color: #1e40af; border: 1px solid #93c5fd; }
+    .scramble-toast-loading { background: #fafafa; color: #6366f1; border: 1px solid #e2e8f0; }
+    .scramble-toast-cancel {
+      margin-left: auto; padding: 2px 8px; border: 1px solid #cbd5e1;
+      border-radius: 4px; background: #fff; color: #475569; cursor: pointer; font-size: 11px;
     }
     .scramble-spinner {
-      width: 14px;
-      height: 14px;
-      border: 2px solid #e2e8f0;
-      border-top: 2px solid #6366f1;
-      border-radius: 50%;
-      animation: scramble-spin 0.6s linear infinite;
-      flex-shrink: 0;
+      width: 14px; height: 14px; border: 2px solid #e2e8f0;
+      border-top-color: #6366f1; border-radius: 50%;
+      animation: scramble-spin 0.6s linear infinite; flex-shrink: 0;
     }
-    @keyframes scramble-spin {
-      to { transform: rotate(360deg); }
+    @keyframes scramble-spin { to { transform: rotate(360deg); } }
+    #scramble-preview-overlay {
+      position: fixed; inset: 0; z-index: 2147483647;
+      background: rgba(15,23,42,0.5); display: flex; align-items: center; justify-content: center;
+      padding: 16px; font-family: inherit;
     }
-
-    /* Dark mode support */
+    .scramble-preview-modal {
+      background: #fff; border-radius: 12px; max-width: 720px; width: 100%;
+      max-height: 85vh; display: flex; flex-direction: column;
+      box-shadow: 0 20px 50px rgba(0,0,0,0.25);
+    }
+    .scramble-preview-header { padding: 16px 20px; border-bottom: 1px solid #e2e8f0; }
+    .scramble-preview-header h3 { margin: 0 0 4px; font-size: 16px; color: #0f172a; }
+    .scramble-preview-header p { margin: 0; font-size: 13px; color: #64748b; }
+    .scramble-preview-panels { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 16px 20px; overflow: auto; flex: 1; }
+    .scramble-preview-panel { display: flex; flex-direction: column; gap: 6px; min-height: 120px; }
+    .scramble-preview-label { font-size: 11px; font-weight: 600; text-transform: uppercase; color: #64748b; letter-spacing: 0.04em; }
+    .scramble-preview-text {
+      flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0;
+      background: #f8fafc; font-size: 13px; line-height: 1.5; white-space: pre-wrap;
+      overflow: auto; max-height: 240px;
+    }
+    .scramble-preview-panel-enhanced .scramble-preview-text { background: #eef2ff; border-color: #c7d2fe; }
+    .scramble-preview-actions { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 20px 16px; border-top: 1px solid #e2e8f0; }
+    .scramble-preview-btn { padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: none; }
+    .scramble-preview-reject { background: #f1f5f9; color: #475569; }
+    .scramble-preview-accept { background: #6366f1; color: #fff; }
+    @media (max-width: 600px) { .scramble-preview-panels { grid-template-columns: 1fr; } }
     @media (prefers-color-scheme: dark) {
-      #scramble-toolbar-inner {
-        background: #1e293b;
-        border-color: #334155;
-        box-shadow: 0 2px 12px rgba(0,0,0,0.3);
-      }
-      .scramble-action-btn {
-        color: #cbd5e1;
-      }
-      .scramble-action-btn:hover {
-        background: #334155;
-        color: #a5b4fc;
-      }
-      .scramble-action-btn.scramble-undo {
-        border-color: #334155;
-        color: #64748b;
-      }
-      #scramble-toolbar-actions::-webkit-scrollbar-thumb {
-        background: #475569;
-      }
-      .scramble-toast-loading {
-        background: #1e293b;
-        color: #a5b4fc;
-        border-color: #334155;
+      #scramble-toolbar-inner { background: #1e293b; border-color: #334155; }
+      #scramble-toolbar-hint { background: #0f172a; color: #94a3b8; border-color: #334155; }
+      .scramble-action-btn { color: #cbd5e1; }
+      .scramble-action-btn:hover { background: #334155; color: #a5b4fc; }
+      .scramble-toast-loading { background: #1e293b; color: #a5b4fc; border-color: #334155; }
+      .scramble-preview-modal { background: #1e293b; }
+      .scramble-preview-header { border-color: #334155; }
+      .scramble-preview-header h3 { color: #f1f5f9; }
+      .scramble-preview-text { background: #0f172a; border-color: #334155; color: #e2e8f0; }
+      .scramble-preview-panel-enhanced .scramble-preview-text { background: #312e81; border-color: #4338ca; }
+      .scramble-preview-actions { border-color: #334155; }
+      .scramble-preview-reject { background: #334155; color: #e2e8f0; }
+    }
+    @media (prefers-contrast: more) {
+      .scramble-action-btn:focus-visible, .scramble-preview-btn:focus-visible, .scramble-toast-cancel:focus-visible {
+        outline: 3px solid #6366f1; outline-offset: 2px;
       }
     }
   `;
